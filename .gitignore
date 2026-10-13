@@ -1,0 +1,18 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserdata/
+*.xcuserstate
+.DS_Store
+
+# xcodegen cache
+# (project.yml is the source of truth; PodSnip.xcodeproj is generated)
+
+# Python
+__pycache__/
+*.pyc
+
+# Local test artifacts
+*.mp3
+*.m4a
+transcript.json

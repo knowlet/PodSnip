@@ -1,0 +1,23 @@
+name: PodSnip
+options:
+  bundleIdPrefix: com.podsnip
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  PodSnip:
+    type: application
+    platform: iOS
+    sources:
+      - path: PodSnip
+        excludes:
+          - Info.plist
+    info:
+      path: PodSnip/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.podsnip.app
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
