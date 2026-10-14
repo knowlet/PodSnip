@@ -18,6 +18,7 @@ final class AudioPlayer: ObservableObject {
 
     private var player: AVPlayer?
     private var timeObserver: Any?
+    private var remoteCommandsConfigured = false
     private var context: ModelContext?
 
     func attach(context: ModelContext) { self.context = context }
@@ -74,6 +75,8 @@ final class AudioPlayer: ObservableObject {
     func snipNow() { onSnip?(currentTime) }
 
     private func setupRemoteCommands() {
+        guard !remoteCommandsConfigured else { return }
+        remoteCommandsConfigured = true
         let cc = MPRemoteCommandCenter.shared()
         cc.playCommand.addTarget { [weak self] _ in
             Task { @MainActor in if self?.isPlaying == false { self?.toggle() } }
