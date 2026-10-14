@@ -95,22 +95,21 @@ struct PlayerView: View {
 
     private func doTranscribe() async {
         busy = "下載音檔…"
+        defer { busy = ""; progress = 0 }
         do {
             try await library.download(episode)
             try context.save()
-            guard let url = library.localAudioURL(for: episode) else { busy = ""; return }
+            guard let url = library.localAudioURL(for: episode) else { return }
             busy = "轉寫中…"
             let segs = try await SpeechTranscriber.shared.transcribe(audioFileURL: url) { p in
                 Task { @MainActor in progress = p }
             }
             episode.segments = segs
             try context.save()
-            progress = 0
         } catch {
             busy = "失敗：\(error.localizedDescription)"
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
-        if episode.hasTranscript { busy = "" }
     }
 
     private func doSnip() async {
