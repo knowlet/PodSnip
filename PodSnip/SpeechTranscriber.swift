@@ -104,7 +104,7 @@ final class SpeechTranscriber: NSObject {
         var curEnd = 0.0
         func flush() {
             let t = cur.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !t.isEmpty { out.append(TranscriptSegment(start: curStart + offset, end: curEnd + offset, text: t)) }
+            if !t.isEmpty { out.append(TranscriptSegment(start: curStart, end: curEnd, text: t)) }
             cur = ""
         }
         for seg in trans.segments {
