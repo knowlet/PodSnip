@@ -41,17 +41,15 @@ final class SpeechTranscriber: NSObject {
         // Split into ~4-minute chunks for reliability.
         let chunkLen: Double = 240
         let nChunks = max(1, Int(ceil(duration / chunkLen)))
-        let workingDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("podsnip-transcription-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: workingDirectory, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: workingDirectory) }
+        let workingDirectory = try TranscriptionWorkingDirectory()
+        defer { try? workingDirectory.remove() }
 
         var all: [TranscriptSegment] = []
         for i in 0..<nChunks {
             let start = Double(i) * chunkLen
             let len = min(chunkLen, duration - start)
             let chunkURL = try await exportChunk(asset: asset, start: start, length: len, index: i,
-                                                 directory: workingDirectory)
+                                                 directory: workingDirectory.url)
             defer { try? FileManager.default.removeItem(at: chunkURL) }
             let segs = try await transcribeOne(url: chunkURL, recognizer: recognizer, offset: start)
             all.append(contentsOf: segs)
@@ -102,27 +100,9 @@ final class SpeechTranscriber: NSObject {
     }
 
     private static func segments(from result: SFSpeechRecognitionResult, offset: Double) -> [TranscriptSegment] {
-        let trans = result.bestTranscription
         // Group word-level segments into ~8s sentences.
-        var out: [TranscriptSegment] = []
-        var cur = ""
-        var curStart = 0.0
-        var curEnd = 0.0
-        func flush() {
-            let t = cur.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !t.isEmpty { out.append(TranscriptSegment(start: curStart, end: curEnd, text: t)) }
-            cur = ""
-        }
-        for seg in trans.segments {
-            let s = seg.timestamp + offset, e = s + seg.duration
-            if cur.isEmpty { curStart = s }
-            cur += (cur.isEmpty ? "" : "") + seg.substring
-            curEnd = e
-            if e - curStart > 8 { flush() }
-            else if seg.substring.hasSuffix("。") || seg.substring.hasSuffix("！") || seg.substring.hasSuffix("？")
-                        || seg.substring.hasSuffix(".") { cur += " "; flush() }
-        }
-        flush()
-        return out
+        TranscriptSegmenter.segments(from: result.bestTranscription.segments.map {
+            TranscriptionWord(timestamp: $0.timestamp, duration: $0.duration, text: $0.substring)
+        }, offset: offset)
     }
 }

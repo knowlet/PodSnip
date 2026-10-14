@@ -2,87 +2,71 @@
 
 **Listen, capture, and revisit podcast ideas.**
 
-PodSnip 是以 SwiftUI 與 SwiftData 製作的原生 iOS Podcast 專案，串起 RSS 節目庫、音訊播放、逐字稿、時間戳擷取（Snip）與選用的 AI 整理。想留下某個觀點時，可以記下播放位置和附近的逐字稿，再以 Markdown 分享。
+PodSnip 是 SwiftUI／SwiftData iOS Podcast 原型：RSS 節目庫、播放與下載、Speech 逐字稿、時間戳擷取（Snip）、AI 整理與 Markdown 分享。
 
-目前是開發中的原型。以下功能與限制依原始碼整理，**尚未完成 Xcode 建置、模擬器或真機執行驗證**。
+2026-10-14 已以 **Xcode 27.0／iOS 27 SDK** 完成原生模擬器建置。三種 AI 來源已接入同一服務；**尚未驗證任何真實模型推理**。本次使用合成資料與注入的假 provider，完整驗證範圍及重現命令見 [docs/VALIDATION.md](docs/VALIDATION.md)。[PR #1](https://github.com/knowlet/PodSnip/pull/1) 保持 Draft。
 
-## 功能
+完整測試包含 35 個單元／契約測試與 1 個 UI 導覽測試：iOS 27 全數通過；iOS 17 與 26 均零失敗，分別明確跳過 3 個與 1 個該版本不支援的 Apple API fixture。
 
-- **RSS 節目庫**：貼上節目 RSS 連結，載入節目封面與單集列表。
-- **播放與下載**：使用 AVPlayer 串流播放，或播放已下載的音檔；提供進度拖曳、後退 15 秒與前進 30 秒。
-- **逐字稿**：下載音檔後透過 Apple Speech 轉寫，預設語言為 `zh-TW`，以約 4 分鐘分段處理。介面提供點句跳播、目前段落高亮與自動捲動。
-- **Snip 擷取**：記錄當下時間戳，以及起始時間距播放位置約 45 秒內的逐字稿段落；沒有逐字稿時仍可留下時間標記。Snip 是文字與時間紀錄，並非匯出剪輯音檔。
-- **AI 整理（選用）**：依逐字稿產生總覽、要點、章節、可展開的心智圖與洞見，並提供逐集問答。設定自帶 API Key 後，建立 Snip 也會嘗試產生 AI 筆記。
-- **Markdown 分享**：「擷取」頁可分享單筆 Snip 的單集名稱、時間、文字與 AI 筆記。
+## 使用
 
-播放器已有 Now Playing 與 MediaPlayer 遙控指令的程式碼，包括將 bookmark 指令連到 Snip；鎖屏、耳機與背景播放的實際行為仍待驗證，詳見下方限制。
+1. 在「節目」頁加入 RSS 連結，選擇單集播放或下載。
+2. 按「轉寫」下載音檔並請求 Speech 授權；預設辨識語言為 `zh-TW`，約四分鐘切段。逐字稿可點句跳播。
+3. 播放時按「Snip 這一段」留下時間與附近逐字稿；沒有逐字稿仍可留下標記。這不是剪輯音檔。
+4. 在「設定」選擇 AI 來源；只有 OpenAI 相容來源需要 Base URL、API Key 與模型。按「測試所選來源」會對該來源傳送合成的簡短文字。
+5. 有逐字稿後可執行「AI 全套」或問答；Snip 會先保存原文，再嘗試產生筆記。失敗原因會顯示在畫面與 Snip 紀錄。
+6. 在「擷取」頁透過系統分享介面分享 Markdown。
 
-## 使用流程
+## 三種 AI 來源
 
-完成建置與必要的專案設定後：
+`ApplicationAIService` 以一次操作開始時的設定快照選擇唯一 provider。五個摘要階段、問答、Snip 筆記與連線測試，全部使用同一入口。變更設定不會讓正在進行的摘要中途換來源；未知路由或失敗會報錯，不會自動轉送其他供應商。
 
-1. 在「節目」頁按 ＋，貼上 RSS 連結並加入。
-2. 選擇單集進入播放器；也可在單集列表滑動選擇「下載」。
-3. 按「轉寫」，下載音檔並請求語音辨識授權，再產生逐字稿。
-4. 播放時按「Snip 這一段」，到「擷取」頁查看或分享。
-5. 若要使用 AI，在「設定」填入可信任服務的 Base URL、API Key 與模型，儲存後測試連線；有逐字稿後可執行「AI 全套」或問答。
-
-### AI 來源的目前狀態
-
-主要 AI 功能目前直接呼叫 `AIClient`，將請求送到設定的 OpenAI 相容 `/chat/completions` 端點。供應商與模型需要支援程式使用的請求格式，包含部分功能要求的 JSON 回應。
-
-| 來源 | 程式中的條件 | 目前接入範圍 |
+| 來源 | 執行條件 | 實作與驗證 |
 | --- | --- | --- |
-| 自帶 Key（OpenAI 相容） | Base URL、Key、模型設定完整 | AI 整理、問答、Snip 筆記與連線測試；尚未執行驗證 |
-| Apple 端側 | iOS 26 版本判斷與模型可用性檢查 | 設定頁檢查／測試與 `AppleBrain` 呼叫實作；尚未接入主要 AI 功能 |
-| Apple 雲端 | iOS 27 版本判斷、可用性與配額檢查 | 設定頁檢查／測試與 `AppleBrain` 呼叫實作；尚未接入主要 AI 功能 |
+| Apple 端側 Foundation Models | iOS 26+、Apple Intelligence 合格裝置、功能已啟用且模型已就緒 | `SystemLanguageModel.default`；原生編譯與合成契約測試，真實推理待驗 |
+| Apple 雲端 Foundation Models（PCC） | iOS 27+、Apple 資格與核准的 managed entitlement、系統可用及未達配額 | 真實 `PrivateCloudComputeLanguageModel` API；原生編譯與合成錯誤測試，entitlement／帳號資格未知，雲端推理待驗 |
+| OpenAI 相容 API | 有效端點、Key、模型，供應商支援 `/chat/completions` 與 JSON object mode | 注入的合成 provider／HTTP fixture 測試；真實端點與費用未測 |
 
-**切換設定頁的 Apple 路由，不會使「AI 全套」、問答或 Snip 筆記改用 Apple 模型。** Apple API／SDK 相容性與實際推理亦尚未驗證。
+Apple 呼叫每次建立新的 `LanguageModelSession`。結構化結果使用實際 `GenerationSchema` guided generation，轉成共用 Codable 輸出並驗證欄位與時間；問答及測試使用純文字。OpenAI 相容 JSON object mode 不等於 schema enforcement，結果仍須通過相同解析與驗證。可偵測的不完整、無效或超出預算結果會顯示錯誤；Apple 的結構完整旗標不保證語意完整，部分相容端點也不提供結束原因。
 
-## 資料流與隱私
+PCC 是 Apple 官方提供且存在於本機 SDK 的 API；部分文件仍可能標示 beta。它需要 [Apple 核准的資格及 entitlement](https://developer.apple.com/private-cloud-compute/)；本專案未申請 entitlement、變更簽章或驗證使用者資格。配額訊息依 `quotaUsage` 與生成時的錯誤呈現，只有 Apple 提供時才顯示重置日期或提升建議；沒有剩餘次數或每日固定重置的保證。網路、服務與配額失敗都會保留原路由並顯示原因。[PCC API](https://developer.apple.com/documentation/foundationmodels/privatecloudcomputelanguagemodel)
 
-本專案未包含自建後端；但使用過程會連線至外部服務，不能視為全程離線或「純端側」。
+## 長逐字稿與涵蓋範圍
 
-- **RSS、封面與音訊**：由 App 直接向對應網址取得。下載音檔存於 App 的 Documents 目錄；節目、單集、逐字稿、AI 整理結果與 Snip 使用本機 SwiftData 儲存。
-- **語音辨識**：當 `supportsOnDeviceRecognition` 為真時，程式要求裝置端辨識；不支援時沒有強制本機辨識，可能使用 Apple 的遠端辨識服務。
-- **AI 請求**：使用目前主要 AI 功能時，逐字稿內容或擷取文字，以及問答輸入，會送至設定的供應商。設定有效的 API Key 後，按 Snip 也可能觸發這類請求。費用與資料處理由該服務的規則決定。
-- **憑證與設定**：API Key 透過 Keychain 儲存；Base URL、模型與路由選擇存於 UserDefaults。Keychain 儲存不代表內容不會傳送：API 請求仍會使用該 Key 向所選端點驗證。
-- **分享**：Markdown 經系統分享介面送至使用者選擇的目的地，請先確認內容適合分享。
+已移除原本 12,000 字元的頭尾／前段截斷。摘要依來源的保守輸入預算分塊，保留文字、原始絕對時間戳與時間範圍；超長單句也會分塊。每塊執行全部五個階段，再依時間合併為分段摘要、要點、章節、心智圖與洞見；全部完成及驗證後才更新舊結果。畫面顯示來源、進度、處理片段數與涵蓋範圍。這是分段整理，未提供的音訊或轉寫空隙不在涵蓋範圍內。
 
-## 建置
+Apple 端側是 4,096 token、PCC 是 32K 的共享上下文，包含輸入與輸出。[Apple 上下文說明](https://developer.apple.com/documentation/foundationmodels/managing-the-context-window)、[WWDC26 工程師說明（08:11）](https://developer.apple.com/videos/play/wwdc2026/8121/)
 
-[project.yml](project.yml) 是 XcodeGen 專案設定來源。目前設定為：
+程式以 UTF-8 bytes 作保守輸入估算，另預留 schema、框架格式與輸出 token，並檢查 schema 實際編碼大小。這不是精確 tokenizer 保證；模型的上下文錯誤仍會顯示，不會偷偷縮短或換 provider。OpenAI 相容來源採 8,192 token 的應用預算，實際模型可能更小，須由使用者選擇相容模型。摘要會產生 **5 × 片段數** 個請求，長內容較慢且可能消耗更多雲端配額／費用。
 
-- iOS deployment target：**17.0**
-- Swift language mode：**5.0**
-- App target／scheme：`PodSnip`
-- 簽章：`CODE_SIGNING_ALLOWED: NO`，`DEVELOPMENT_TEAM` 為空
+問答依問題文字比對選取可放入預算的時間戳片段，每則答案顯示選取數量、範圍與遺漏提示；文字比對可能漏掉相關證據，答案不代表搜尋過全集。過長問題直接報錯。長 Snip 筆記也分塊處理，原始 Snip 內容不會因 AI 失敗遺失。完成與失敗狀態會保留，方便重試。
 
-需要 macOS、Xcode 與 [XcodeGen](https://github.com/yonaskolb/XcodeGen)。Deployment target 不等於可用的建置 SDK：原始碼直接匯入 `FoundationModels`，並引用 `PrivateCloudComputeLanguageModel` 等符號。既有建置說明要求 Xcode 27+／iOS 27 SDK；**目前沒有建置結果可確認這項需求或相關 API 相容性**。
+## 資料流
 
-在專案根目錄執行既有建置命令：
+- RSS、封面及音訊由 App 直接向各網址取得；下載音檔位於 App Documents，節目、逐字稿、摘要與 Snip 位於本機 SwiftData。
+- Speech 在 `supportsOnDeviceRecognition` 為真時要求端側辨識；其他情況可能使用 Apple 遠端辨識。
+- Apple 端側 AI 在裝置處理。PCC 把內容傳至 Apple；OpenAI 相容路由把內容送至指定端點。Snip 也可能觸發所選來源的 AI 請求。請依服務規則評估內容及費用。
+- API Key 存 Keychain，其他 AI 設定存 UserDefaults。Apple 來源不需要 BYOK Key。
+- 分享內容包含文字、時間、筆記與可能的 AI 錯誤；分享前請確認內容。
+
+## 建置與本地測試
+
+[project.yml](project.yml) 是設定來源；產生的 Xcode 專案與共用測試 scheme 一併保留，修改設定後請重新產生。需要已安裝的 **Xcode 27+／iOS 27 SDK**（PCC 符號無法靠 `#available` 在舊 SDK 編譯）及 [XcodeGen](https://github.com/yonaskolb/XcodeGen)。保留 iOS **17.0** deployment target、Swift **5.0** language mode、`CODE_SIGNING_ALLOWED=NO`、空白開發團隊。
 
 ```sh
 xcodegen generate
-xcodebuild -project PodSnip.xcodeproj -scheme PodSnip -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project PodSnip.xcodeproj -scheme PodSnip \
+  -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath .build/local CODE_SIGNING_ALLOWED=NO build
+xcodebuild -project PodSnip.xcodeproj -scheme PodSnip \
+  -destination 'platform=iOS Simulator,id=YOUR_FRESH_SIMULATOR_UUID' \
+  -derivedDataPath .build/local CODE_SIGNING_ALLOWED=NO test
 ```
 
-以上是待執行的建置步驟，並非已通過的驗證。真機安裝另需設定自己的開發團隊與簽章。
+請用已安裝 runtime 的全新模擬器執行合成測試。測試不使用私人音檔、麥克風、Keychain 憑證或實際模型。Speech usage description 與背景 audio 已由 `project.yml` 宣告；這些宣告不會授予裝置權限。
 
-## 已知限制與驗證狀態
+## 驗收限制與既有修正
 
-- **權限與背景設定尚有缺口**：目前 `Info.plist` 未宣告 `NSSpeechRecognitionUsageDescription` 或 `UIBackgroundModes` 的 `audio`，可能導致語音授權流程失敗及背景播放無法正常運作；測試前需補齊必要設定。
-- **長逐字稿會截斷**：AI 整理通常最多使用約 12,000 字元；一般摘要保留開頭與結尾，含時間戳的章節／問答保留前段。因此輸出可能缺少未送入模型的內容。
-- **AI 輸出需要核對**：摘要、章節與問答依賴供應商回應；本專案尚未驗證其正確性、涵蓋率或速度。
-- **原生驗證尚未執行**：Swift／Xcode 編譯、Speech／AVFoundation／MediaPlayer 整合、UI、背景播放及 Apple 模型推理均未完成執行驗證。原始碼中已有實作，不代表這些路徑已可在裝置上使用。
+既有四項修正保留：轉寫 offset 只加一次、離開轉寫流程時清除 busy／progress、每個播放器只註冊一次遠端指令，以及每次轉寫使用獨立暫存目錄並清理。新增的合成測試直接執行 production 時間分組與目錄管理 helper；既有已儲存逐字稿不會自動改寫。
 
-### 尚未合併的修正
-
-截至 2026-10-14，[Draft PR #1](https://github.com/knowlet/PodSnip/pull/1) 的程式碼基準為 `9198ba3d856272ae8a4f3991f4a5cf042977fbca`，包含四項修正，尚未合併至 `main`：
-
-1. 轉寫分段的時間偏移只套用一次，避免後段時間戳重複加總。
-2. 轉寫流程結束時清除忙碌與進度狀態。
-3. 每個 AudioPlayer 實例只註冊一次遙控指令，避免切集後重複回呼。
-4. 每次轉寫使用獨立暫存目錄，並在流程結束時嘗試清理。
-
-這些修正經原始碼檢視；時間戳另做過算術診斷，但不是 Swift 或 iOS 測試。既有逐字稿不會自動重寫。合併前仍需驗證長音檔時間戳、失敗後重試、多次切集的遙控行為，以及重疊轉寫的檔案隔離與清理；完整驗收項目見 PR。
+真機 Speech 授權／失敗重試、八分鐘以上音檔、點句播放與高亮、鎖屏耳機指令、背景播放、真實 Apple／PCC／BYOK 推理及品質／速度仍需驗收。PCC 最小後續步驟是先確認帳號已具 Apple 核准的資格與 entitlement，再以獨立授權的簽章／合成輸入測試；本次沒有進行申請或更動。
