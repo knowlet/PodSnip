@@ -41,11 +41,15 @@ final class SpeechTranscriber: NSObject {
         // Split into ~4-minute chunks for reliability.
         let chunkLen: Double = 240
         let nChunks = max(1, Int(ceil(duration / chunkLen)))
+        let workingDirectory = try TranscriptionWorkingDirectory()
+        defer { try? workingDirectory.remove() }
+
         var all: [TranscriptSegment] = []
         for i in 0..<nChunks {
             let start = Double(i) * chunkLen
             let len = min(chunkLen, duration - start)
-            let chunkURL = try await exportChunk(asset: asset, start: start, length: len, index: i)
+            let chunkURL = try await exportChunk(asset: asset, start: start, length: len, index: i,
+                                                 directory: workingDirectory.url)
             defer { try? FileManager.default.removeItem(at: chunkURL) }
             let segs = try await transcribeOne(url: chunkURL, recognizer: recognizer, offset: start)
             all.append(contentsOf: segs)
@@ -54,12 +58,12 @@ final class SpeechTranscriber: NSObject {
         return all
     }
 
-    private func exportChunk(asset: AVURLAsset, start: Double, length: Double, index: Int) async throws -> URL {
+    private func exportChunk(asset: AVURLAsset, start: Double, length: Double, index: Int,
+                             directory: URL) async throws -> URL {
         guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
             throw TranscribeError.exportFailed
         }
-        let out = FileManager.default.temporaryDirectory.appendingPathComponent("podsnip-chunk-\(index).m4a")
-        try? FileManager.default.removeItem(at: out)
+        let out = directory.appendingPathComponent("podsnip-chunk-\(index).m4a")
         session.outputURL = out
         session.outputFileType = .m4a
         session.timeRange = CMTimeRange(start: CMTime(seconds: start, preferredTimescale: 600),
@@ -96,27 +100,9 @@ final class SpeechTranscriber: NSObject {
     }
 
     private static func segments(from result: SFSpeechRecognitionResult, offset: Double) -> [TranscriptSegment] {
-        let trans = result.bestTranscription
         // Group word-level segments into ~8s sentences.
-        var out: [TranscriptSegment] = []
-        var cur = ""
-        var curStart = 0.0
-        var curEnd = 0.0
-        func flush() {
-            let t = cur.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !t.isEmpty { out.append(TranscriptSegment(start: curStart + offset, end: curEnd + offset, text: t)) }
-            cur = ""
-        }
-        for seg in trans.segments {
-            let s = seg.timestamp + offset, e = s + seg.duration
-            if cur.isEmpty { curStart = s }
-            cur += (cur.isEmpty ? "" : "") + seg.substring
-            curEnd = e
-            if e - curStart > 8 { flush() }
-            else if seg.substring.hasSuffix("。") || seg.substring.hasSuffix("！") || seg.substring.hasSuffix("？")
-                        || seg.substring.hasSuffix(".") { cur += " "; flush() }
-        }
-        flush()
-        return out
+        TranscriptSegmenter.segments(from: result.bestTranscription.segments.map {
+            TranscriptionWord(timestamp: $0.timestamp, duration: $0.duration, text: $0.substring)
+        }, offset: offset)
     }
 }

@@ -100,6 +100,7 @@ final class Snip {
     var atTime: Double
     var text: String
     var aiNote: String?
+    var aiError: String?
     var createdAt: Date
 
     init(id: UUID = UUID(), episodeID: UUID? = nil, episodeTitle: String,
@@ -110,6 +111,7 @@ final class Snip {
         self.atTime = atTime
         self.text = text
         self.aiNote = aiNote
+        self.aiError = nil
         self.createdAt = Date()
     }
 }

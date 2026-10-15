@@ -62,5 +62,10 @@ struct AIConfig {
         else { KeychainStore.save(apiKey, account: "apiKey") }
     }
 
-    var isConfigured: Bool { !apiKey.isEmpty && !model.isEmpty && URL(string: baseURL) != nil }
+    var isConfigured: Bool {
+        guard let url = URL(string: baseURL), let host = url.host, !host.isEmpty,
+              ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return false }
+        return nonblank(apiKey) && nonblank(model)
+    }
 }

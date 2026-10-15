@@ -19,10 +19,29 @@ enum AIError: LocalizedError {
 }
 
 /// OpenAI-compatible chat client (OpenAI / Anthropic-compat / Gemini-compat / OpenRouter).
-struct AIClient {
+struct AIClient: AIProvider {
     let config: AIConfig
+    private let session: URLSession
+    init(config: AIConfig, session: URLSession = .shared) {
+        self.config = config
+        self.session = session
+    }
+    var route: AIRoute { .byok }
+    var availability: AIAvailability {
+        AIAvailability(isAvailable: config.isConfigured, reason: config.isConfigured ? "端點設定完整；連線及模型支援待測試" : "請填入有效的 Base URL、Key、模型")
+    }
 
-    func chat(system: String, user: String, jsonMode: Bool = false, maxTokens: Int = 4096) async throws -> String {
+    func text(_ request: AIRequest) async throws -> String {
+        try await chat(system: request.system, user: request.user, maxTokens: request.maximumOutputTokens)
+    }
+    func structured(_ request: AIRequest, kind: AIOutputKind) async throws -> Data {
+        // JSON object mode is a transport request, not schema enforcement. The
+        // service decodes and validates the same Codable shapes as Apple output.
+        let result = try await chat(system: request.system, user: request.user, jsonMode: true, maxTokens: request.maximumOutputTokens)
+        return Data(result.utf8)
+    }
+
+    private func chat(system: String, user: String, jsonMode: Bool = false, maxTokens: Int = 4096) async throws -> String {
         guard config.isConfigured else { throw AIError.notConfigured }
         let base = config.baseURL.hasSuffix("/") ? String(config.baseURL.dropLast()) : config.baseURL
         guard let url = URL(string: base + "/chat/completions") else { throw AIError.badURL }
@@ -43,21 +62,27 @@ struct AIClient {
         req.timeoutInterval = 180
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw AIError.http(-1, "no response") }
         guard (200..<300).contains(http.statusCode) else {
             throw AIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
         }
-        struct Choice: Decodable { struct Msg: Decodable { var content: String? }; var message: Msg }
+        struct Choice: Decodable {
+            struct Msg: Decodable { var content: String? }
+            var message: Msg
+            var finish_reason: String?
+        }
         struct Reply: Decodable { var choices: [Choice] }
         guard let reply = try? JSONDecoder().decode(Reply.self, from: data),
-              let text = reply.choices.first?.message.content, !text.isEmpty else {
+              let choice = reply.choices.first,
+              let text = choice.message.content, !text.isEmpty else {
             throw AIError.decode(String(data: data, encoding: .utf8) ?? "")
+        }
+        if choice.finish_reason == "length" { throw AIServiceError.context("供應商達到輸出上限；未儲存不完整回應") }
+        if let reason = choice.finish_reason, reason != "stop" {
+            throw AIServiceError.malformed("供應商未完成文字回應（\(reason)）")
         }
         return text
     }
 
-    func testConnection() async throws -> String {
-        try await chat(system: "Reply with exactly: OK", user: "ping", maxTokens: 16)
-    }
 }

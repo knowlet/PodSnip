@@ -2,7 +2,7 @@ import SwiftUI
 import SwiftData
 
 func fmtTime(_ s: Double) -> String {
-    guard s.isFinite, s >= 0 else { return "0:00" }
+    guard s.isFinite, s >= 0, s <= Double(Int.max / 2) else { return "0:00" }
     let m = Int(s) / 60, sec = Int(s) % 60
     let h = m / 60
     return h > 0 ? String(format: "%d:%02d:%02d", h, m % 60, sec) : String(format: "%d:%02d", m, sec)
@@ -18,6 +18,7 @@ struct PlayerView: View {
     @State private var busy = ""
     @State private var progress: Double = 0
     @State private var snipFlash: String?
+    @State private var snipFailed = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -51,7 +52,9 @@ struct PlayerView: View {
                         .background(.yellow.opacity(0.9)).foregroundStyle(.black).cornerRadius(20)
                 }
                 .padding(.top, 4)
-                if let f = snipFlash { Text(f).font(.caption).foregroundStyle(.green) }
+                if let f = snipFlash {
+                    Text(f).font(.caption).foregroundStyle(snipFailed ? Color.orange : Color.green)
+                }
             }
             .padding(.vertical, 8)
 
@@ -62,12 +65,23 @@ struct PlayerView: View {
                 }
                 .disabled(!busy.isEmpty || episode.hasTranscript)
                 Button(pipeline.running ? pipeline.stage : "AI 全套") {
-                    Task { await pipeline.runAll(episode: episode, client: AIClient(config: .load())); try? context.save() }
+                    Task {
+                        let service = ApplicationAIService(config: .load())
+                        await pipeline.runAll(episode: episode, service: service)
+                        do { try context.save() }
+                        catch { pipeline.stage = "儲存失敗：\(error.localizedDescription)" }
+                    }
                 }
                 .disabled(pipeline.running || !episode.hasTranscript)
             }
             .buttonStyle(.bordered)
             .font(.caption)
+            if !pipeline.stage.isEmpty {
+                Text(pipeline.stage).font(.caption)
+                    .foregroundStyle(pipeline.stage.hasPrefix("失敗") ? Color.red : Color.secondary)
+                    .padding(.horizontal)
+                    .accessibilityIdentifier("aiPipelineStatus")
+            }
             if progress > 0 && progress < 1 { ProgressView(value: progress).padding(.horizontal) }
 
             Picker("", selection: $tab) {
@@ -85,7 +99,7 @@ struct PlayerView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             player.onSnip = { [t = episode.title, id = episode.id] _ in
-                Task { @MainActor in await Snack.shared.snip(episodeID: id, title: t) }
+                Task { @MainActor in _ = await Snack.shared.snip(episodeID: id, title: t) }
             }
             if player.episode?.id != episode.id {
                 player.play(episode, localURL: library.localAudioURL(for: episode))
@@ -95,27 +109,31 @@ struct PlayerView: View {
 
     private func doTranscribe() async {
         busy = "下載音檔…"
+        defer { busy = ""; progress = 0 }
         do {
             try await library.download(episode)
             try context.save()
-            guard let url = library.localAudioURL(for: episode) else { busy = ""; return }
+            guard let url = library.localAudioURL(for: episode) else { return }
             busy = "轉寫中…"
             let segs = try await SpeechTranscriber.shared.transcribe(audioFileURL: url) { p in
                 Task { @MainActor in progress = p }
             }
             episode.segments = segs
             try context.save()
-            progress = 0
         } catch {
             busy = "失敗：\(error.localizedDescription)"
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
-        if episode.hasTranscript { busy = "" }
     }
 
     private func doSnip() async {
-        await Snack.shared.snip(episodeID: episode.id, title: episode.title)
-        snipFlash = "已擷取 ✓"
+        let snip = await Snack.shared.snip(episodeID: episode.id, title: episode.title)
+        snipFailed = snip == nil || snip?.aiError != nil
+        if let snip {
+            snipFlash = snip.aiError.map { "已擷取；AI 筆記失敗：\($0)" } ?? "已擷取 ✓"
+        } else {
+            snipFlash = "擷取儲存失敗，請重試"
+        }
         try? await Task.sleep(nanoseconds: 1_500_000_000)
         snipFlash = nil
     }
@@ -126,24 +144,36 @@ struct PlayerView: View {
 final class Snack {
     static let shared = Snack()
     var context: ModelContext?
-    func snip(episodeID: UUID, title: String) async {
-        // Resolve via player time; context wired from ContentView onAppear.
-        let t = AudioPlayer.shared.currentTime
-        guard let ctx = context else { return }
-        // Find surrounding transcript text
-        var text = "（無逐字稿）"
-        if let ep = try? ctx.fetch(FetchDescriptor<EpisodeItem>(
-            predicate: #Predicate { $0.id == episodeID })).first {
-            let near = ep.segments.filter { abs($0.start - t) < 45 }
-            if !near.isEmpty { text = near.map { $0.text }.joined(separator: " ") }
-            var note: String?
-            if AIConfig.load().isConfigured {
-                let (s, u) = Prompts.snipNote(segment: String(text.prefix(600)))
-                note = try? await AIClient(config: .load()).chat(system: s, user: u, jsonMode: true, maxTokens: 256)
-            }
-            ctx.insert(Snip(episodeID: episodeID, episodeTitle: title, atTime: t, text: text, aiNote: note))
-            try? ctx.save()
+
+    init(context: ModelContext? = nil) { self.context = context }
+
+    @discardableResult
+    func snip(episodeID: UUID, title: String, service: ApplicationAIService? = nil,
+              captureTime: Double? = nil) async -> Snip? {
+        // The injected time avoids touching playback in local fixture tests.
+        let time = captureTime ?? AudioPlayer.shared.currentTime
+        let selectedService = service ?? ApplicationAIService(config: .load())
+        guard let ctx = context,
+              let episode = try? ctx.fetch(FetchDescriptor<EpisodeItem>(
+                predicate: #Predicate { $0.id == episodeID })).first else { return nil }
+        let nearby = episode.segments.filter { abs($0.start - time) < 45 }
+        let hasText = !nearby.isEmpty
+        let text = hasText ? nearby.map(\.text).joined(separator: " ") : "（無逐字稿）"
+        let snip = Snip(episodeID: episodeID, episodeTitle: title, atTime: time, text: text)
+        ctx.insert(snip)
+        // Raw capture is durable before any provider is contacted.
+        do { try ctx.save() }
+        catch { return nil }
+
+        do {
+            guard hasText else { throw AIServiceError.context("擷取已儲存，但附近沒有逐字稿可產生筆記") }
+            snip.aiNote = try await selectedService.note(segment: text).note
+        } catch {
+            snip.aiError = error.localizedDescription
         }
+        do { try ctx.save() }
+        catch { snip.aiError = "AI 筆記儲存失敗：\(error.localizedDescription)" }
+        return snip
     }
 }
 
