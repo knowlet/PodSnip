@@ -6,7 +6,9 @@ PodSnip 是 SwiftUI／SwiftData iOS Podcast 原型：RSS 節目庫、播放與�
 
 2026-10-14 已以 **Xcode 27.0／iOS 27 SDK** 完成原生模擬器建置。三種 AI 來源已接入同一服務；**尚未驗證任何真實模型推理**。本次使用合成資料與注入的假 provider，完整驗證範圍及重現命令見 [docs/VALIDATION.md](docs/VALIDATION.md)。[PR #1](https://github.com/knowlet/PodSnip/pull/1) 保持 Draft。
 
-完整測試包含 35 個單元／契約測試與 1 個 UI 導覽測試：iOS 27 全數通過；iOS 17 與 26 均零失敗，分別明確跳過 3 個與 1 個該版本不支援的 Apple API fixture。
+截至 `0774679bd091ce7ade63ebc9776f84688f104a1a` 的歷史原生驗證包含 35 個單元／契約測試與 1 個 UI 導覽測試：iOS 27 全數通過；iOS 17 與 26 均零失敗，分別明確跳過 3 個與 1 個該版本不支援的 Apple API fixture。這些結果不涵蓋後續的持久化遷移回歸變更。
+
+`0949dd07858050619534922f3b24c5533254475d` 新增 4 個舊版 SwiftData 儲存庫遷移測試，目前共撰寫 39 個單元／契約測試，另有 1 個 UI 導覽測試；新增的 4 個測試尚未在 iOS 17／26／27 原生執行。本次 Linux 環境的靜態檢查與 Swift 語法解析不等於原生驗證，也尚未產生 SwiftData SQLite fixture 或證實舊資料庫遷移成功。詳細界線見 [docs/VALIDATION.md](docs/VALIDATION.md)。
 
 ## 使用
 
