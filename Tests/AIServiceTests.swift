@@ -333,7 +333,10 @@ final class AIServiceTests: XCTestCase {
         XCTAssertNotNil(episode.mindmapJSON)
         XCTAssertNotNil(episode.insightsJSON)
         XCTAssertEqual(provider.requests.map(\.operation), [.overview, .takeaways, .chapters, .mindmap, .insights])
-        _ = try JSONDecoder().decode(TakeawaysOutput.self, from: Data(try XCTUnwrap(episode.takeawaysJSON).utf8))
+        let takeawaysJSON = try XCTUnwrap(episode.takeawaysJSON)
+        let stored = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(takeawaysJSON.utf8)) as? [String: Any])
+        XCTAssertEqual((stored["schemaVersion"] as? NSNumber)?.intValue, SummaryArchive.currentVersion)
+        _ = try JSONDecoder().decode(TakeawaysOutput.self, from: Data(takeawaysJSON.utf8))
         _ = try JSONDecoder().decode(ChaptersOutput.self, from: Data(try XCTUnwrap(episode.chaptersJSON).utf8))
         _ = try JSONDecoder().decode(MindmapOutput.self, from: Data(try XCTUnwrap(episode.mindmapJSON).utf8))
         _ = try JSONDecoder().decode(InsightsOutput.self, from: Data(try XCTUnwrap(episode.insightsJSON).utf8))
@@ -421,6 +424,200 @@ final class AIServiceTests: XCTestCase {
         XCTAssertEqual(try context.fetch(FetchDescriptor<Snip>()).count, 1)
     }
 
+    func testLegacySummaryFixtureDecodesWithDefaultsAndStrictContractRejectsIt() async throws {
+        let bundle = Bundle(for: AIServiceTests.self)
+        let url = try XCTUnwrap(
+            bundle.url(forResource: "legacy-summary-v1", withExtension: "json")
+                ?? bundle.url(forResource: "legacy-summary-v1", withExtension: "json", subdirectory: "Fixtures"),
+            "The unversioned summary fixture must be in the test bundle")
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: String])
+        let takeawaysJSON = try XCTUnwrap(root["takeawaysJSON"])
+        let chaptersJSON = try XCTUnwrap(root["chaptersJSON"])
+        let mindmapJSON = try XCTUnwrap(root["mindmapJSON"])
+        let insightsJSON = try XCTUnwrap(root["insightsJSON"])
+
+        XCTAssertThrowsError(try JSONDecoder().decode(TakeawaysOutput.self, from: Data(takeawaysJSON.utf8)))
+        XCTAssertThrowsError(try JSONDecoder().decode(ChaptersOutput.self, from: Data(chaptersJSON.utf8)))
+        XCTAssertThrowsError(try JSONDecoder().decode(MindmapOutput.self, from: Data(mindmapJSON.utf8)))
+        XCTAssertThrowsError(try JSONDecoder().decode(InsightsOutput.self, from: Data(insightsJSON.utf8)))
+
+        let takeaways = try XCTUnwrap(SummaryArchive.takeaways(from: takeawaysJSON))
+        XCTAssertEqual(takeaways.map(\.title), ["合成要點", "只有標題"])
+        XCTAssertEqual(takeaways.map(\.detail), ["舊版說明", ""])
+        XCTAssertEqual(takeaways.map(\.at), [0.0, 12.5])
+
+        let chapters = try XCTUnwrap(SummaryArchive.chapters(from: chaptersJSON))
+        XCTAssertEqual(chapters.map(\.start), [480.0, 0.0])
+        XCTAssertEqual(chapters.map(\.title), ["合成章節", "缺秒數"])
+        XCTAssertNil(chapters[0].summary)
+        XCTAssertEqual(chapters[1].summary, "一句")
+
+        let map = try XCTUnwrap(SummaryArchive.mindmap(from: mindmapJSON))
+        XCTAssertEqual(map.label, "主題")
+        XCTAssertEqual(map.children?.first?.label, "分支")
+        XCTAssertEqual(map.children?.first?.children?.first?.label, "葉")
+        XCTAssertEqual(map.children?.first?.children?.first?.children?.first?.label, "更深一層")
+
+        let insights = try XCTUnwrap(SummaryArchive.insights(from: insightsJSON))
+        XCTAssertEqual(insights.map(\.0), ["洞見", "有內文"])
+        XCTAssertEqual(insights.map(\.1), ["", "依據"])
+
+        let versionOne = #"{"schemaVersion":1,"takeaways":[{"title":"舊版","detail":"說明"}]}"#
+        XCTAssertEqual(SummaryArchive.takeaways(from: versionOne)?.first?.at, 0)
+        let incompleteCurrent = #"{"schemaVersion":2,"takeaways":[{"title":"缺時間","detail":"說明"}]}"#
+        XCTAssertNil(SummaryArchive.takeaways(from: incompleteCurrent))
+        let future = #"{"schemaVersion":3,"takeaways":[{"title":"未來"}]}"#
+        XCTAssertNil(SummaryArchive.takeaways(from: future))
+
+        let persisted = try SummaryArchive.persist(TakeawaysOutput(takeaways: [
+            TakeawayOutput(title: "新要點", detail: "完整", at: 4)
+        ]))
+        let roundTrip = try XCTUnwrap(SummaryArchive.takeaways(from: persisted))
+        XCTAssertEqual(roundTrip.map(\.title), ["新要點"])
+        XCTAssertEqual(roundTrip.map(\.detail), ["完整"])
+        XCTAssertEqual(roundTrip.map(\.at), [4.0])
+
+        let provider = SyntheticAIProvider(route: .byok)
+        provider.overrideStructuredData = Data(takeawaysJSON.utf8)
+        let service = ApplicationAIService(config: configuration(.byok), provider: provider)
+        do {
+            _ = try await service.takeaways(transcript: "Synthetic transcript")
+            XCTFail("A saved legacy summary must not pass the current provider contract")
+        } catch AIServiceError.malformed { }
+        catch { XCTFail("Expected malformed output, got \(error)") }
+    }
+
+    func testFailedSummarySaveLeavesFailedStateWithRetryAndClear() async throws {
+        let container = try inMemoryContainer()
+        let context = container.mainContext
+        let episode = fixtureEpisode()
+        episode.summaryMarkdown = "Existing summary"
+        context.insert(episode)
+        try context.save()
+        let pipeline = SummaryPipeline()
+
+        episode.summaryMarkdown = "Unsaved replacement"
+        episode.takeawaysJSON = "unsaved"
+        pipeline.persist(context, save: { _ in throw SyntheticSaveFailure() })
+
+        XCTAssertEqual(pipeline.saveState, .failed("儲存失敗。"))
+        XCTAssertNotEqual(pipeline.saveState, .pending)
+        XCTAssertTrue(context.hasChanges)
+        pipeline.clearUnsaved(context)
+        XCTAssertEqual(pipeline.saveState, .idle)
+        XCTAssertEqual(episode.summaryMarkdown, "Existing summary")
+        XCTAssertNil(episode.takeawaysJSON)
+        XCTAssertFalse(context.hasChanges)
+
+        episode.summaryMarkdown = "Retry me"
+        pipeline.persist(context, save: { _ in throw SyntheticSaveFailure() })
+        pipeline.retryPersist(context)
+        XCTAssertEqual(pipeline.saveState, .idle)
+        XCTAssertEqual(episode.summaryMarkdown, "Retry me")
+        XCTAssertFalse(context.hasChanges)
+
+        episode.summaryMarkdown = "Still pending edit"
+        pipeline.clearUnsaved(context)
+        XCTAssertEqual(episode.summaryMarkdown, "Still pending edit")
+        XCTAssertTrue(context.hasChanges)
+    }
+
+    func testFailedSnipSaveIsClearedAndCanBeRetried() async throws {
+        let container = try inMemoryContainer()
+        let context = container.mainContext
+        let episode = fixtureEpisode()
+        context.insert(episode)
+        try context.save()
+        let provider = SyntheticAIProvider(route: .onDevice)
+        let service = ApplicationAIService(config: configuration(.onDevice, emptyCredentials: true), provider: provider)
+        let snack = Snack(context: context)
+        snack.saveChanges = { _ in throw SyntheticSaveFailure() }
+
+        let failed = await snack.snip(episodeID: episode.id, title: episode.title, service: service, captureTime: 2)
+
+        XCTAssertNil(failed)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<Snip>()).count, 0)
+        XCTAssertTrue(provider.requests.isEmpty)
+        snack.saveChanges = { try $0.save() }
+        let retried = await snack.snip(episodeID: episode.id, title: episode.title, service: service, captureTime: 2)
+        XCTAssertNotNil(retried)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<Snip>()).count, 1)
+    }
+
+    func testFailedNoteSaveBecomesFailedAndSupportsRetryAndClear() async throws {
+        let container = try inMemoryContainer()
+        let context = container.mainContext
+        let episode = fixtureEpisode()
+        context.insert(episode)
+        try context.save()
+        let provider = SyntheticAIProvider(route: .onDevice)
+        let service = ApplicationAIService(config: configuration(.onDevice, emptyCredentials: true), provider: provider)
+        let snack = Snack(context: context)
+        var attempts = 0
+        snack.saveChanges = { context in
+            attempts += 1
+            if attempts == 2 { throw SyntheticSaveFailure() }
+            try context.save()
+        }
+
+        let snip = try XCTUnwrap(await snack.snip(episodeID: episode.id, title: episode.title, service: service, captureTime: 2))
+
+        XCTAssertNil(snip.aiNote)
+        XCTAssertEqual(snip.aiError, "AI 筆記儲存失敗。")
+        XCTAssertFalse(context.hasChanges)
+        let persisted = try context.fetch(FetchDescriptor<Snip>())
+        XCTAssertEqual(persisted.first?.aiError, "AI 筆記儲存失敗。")
+        XCTAssertNil(persisted.first?.aiNote)
+
+        snack.saveChanges = { try $0.save() }
+        await snack.retryNote(snip, service: service)
+        XCTAssertEqual(snip.aiNote, "Synthetic parsed note")
+        XCTAssertNil(snip.aiError)
+        XCTAssertFalse(context.hasChanges)
+
+        snip.aiError = "AI 筆記儲存失敗。"
+        try context.save()
+        XCTAssertTrue(snack.clearFailure(snip))
+        XCTAssertNil(snip.aiError)
+        XCTAssertFalse(context.hasChanges)
+
+        snip.aiError = "AI 筆記儲存失敗。"
+        try context.save()
+        snack.saveChanges = { _ in throw SyntheticSaveFailure() }
+        XCTAssertFalse(snack.clearFailure(snip))
+        XCTAssertEqual(snip.aiError, "AI 筆記儲存失敗。")
+        XCTAssertFalse(context.hasChanges)
+    }
+
+    func testSnipShareOmitsProviderResponseBody() async throws {
+        let container = try inMemoryContainer()
+        let context = container.mainContext
+        let episode = fixtureEpisode()
+        context.insert(episode)
+        try context.save()
+        let provider = SyntheticAIProvider(route: .byok)
+        let raw = #"{"error":"synthetic raw provider body","secret":"sk-live-test"}"#
+        provider.thrown = AIError.http(502, raw)
+        let service = ApplicationAIService(config: configuration(.byok), provider: provider)
+        let snack = Snack(context: context)
+
+        let snip = try XCTUnwrap(await snack.snip(episodeID: episode.id, title: episode.title, service: service, captureTime: 2))
+        XCTAssertEqual(snip.aiError, "AI 請求失敗 HTTP 502。")
+        XCTAssertFalse(snip.aiError?.contains("synthetic raw provider body") == true)
+        XCTAssertFalse(snip.aiError?.contains("sk-live-test") == true)
+        let shared = snipShareMarkdown(episodeTitle: snip.episodeTitle, atTime: snip.atTime, text: snip.text,
+                                       aiNote: snip.aiNote, aiError: snip.aiError)
+        XCTAssertTrue(shared.contains("AI 請求失敗 HTTP 502。"))
+        XCTAssertFalse(shared.contains("synthetic raw provider body"))
+        XCTAssertFalse(shared.contains("sk-live-test"))
+
+        let historical = "AI 請求失敗 HTTP 429：synthetic rate limit"
+        let leaked = snipShareMarkdown(episodeTitle: "合成", atTime: 1, text: "合成片段", aiNote: nil, aiError: historical)
+        XCTAssertEqual(leaked.contains("AI 筆記失敗。"), true)
+        XCTAssertFalse(leaked.contains("synthetic rate limit"))
+        XCTAssertFalse(leaked.contains("429："))
+    }
+
     func testLegacySnipJSONDisplaysParsedNoteAndPlainTextRemainsReadable() {
         XCTAssertEqual(displayedSnipNote(#"{"note":"Synthetic legacy note"}"#), "Synthetic legacy note")
         XCTAssertEqual(displayedSnipNote("Synthetic plain note"), "Synthetic plain note")
@@ -498,11 +695,14 @@ final class AIServiceTests: XCTestCase {
     }
 }
 
+private struct SyntheticSaveFailure: Error {}
+
 /// A local spy, not a model. Every return value is authored below.
 private final class SyntheticAIProvider: AIProvider {
     let route: AIRoute
     var availability = AIAvailability(isAvailable: true, reason: "Synthetic provider available")
     var failure: AIServiceError?
+    var thrown: Error?
     var overrideStructuredData: Data?
     var onRequest: (@MainActor (AIRequest) -> Void)?
     private(set) var requests: [AIRequest] = []
@@ -513,6 +713,7 @@ private final class SyntheticAIProvider: AIProvider {
     func text(_ request: AIRequest) async throws -> String {
         requests.append(request)
         await onRequest?(request)
+        if let thrown { throw thrown }
         if let failure { throw failure }
         return request.operation == .connectionTest ? "OK" : "Synthetic answer [00:00]"
     }
@@ -521,6 +722,7 @@ private final class SyntheticAIProvider: AIProvider {
         requests.append(request)
         await onRequest?(request)
         kinds.append(kind)
+        if let thrown { throw thrown }
         if let failure { throw failure }
         if let overrideStructuredData { return overrideStructuredData }
         let encoder = JSONEncoder()

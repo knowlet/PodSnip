@@ -1,10 +1,18 @@
 import Foundation
+import SwiftData
+
+enum SummarySaveState: Equatable {
+    case idle
+    case pending
+    case failed(String)
+}
 
 /// Processes every supplied transcript chunk with one immutable provider selection.
 @MainActor
 final class SummaryPipeline: ObservableObject {
     @Published var stage: String = ""
     @Published var running = false
+    @Published private(set) var saveState: SummarySaveState = .idle
 
     func runAll(episode: EpisodeItem, service: ApplicationAIService) async {
         guard !running else { return }
@@ -85,13 +93,33 @@ final class SummaryPipeline: ObservableObject {
         }
     }
 
+    /// Writes the in-memory summary. A thrown save moves to `.failed` and keeps
+    /// the unsaved changes so they can be retried; it does not stay `.pending`.
+    func persist(_ context: ModelContext, save: (ModelContext) throws -> Void = { try $0.save() }) {
+        saveState = .pending
+        do {
+            try save(context)
+            saveState = .idle
+        } catch {
+            saveState = .failed("儲存失敗。")
+        }
+    }
+
+    func retryPersist(_ context: ModelContext, save: (ModelContext) throws -> Void = { try $0.save() }) {
+        guard case .failed = saveState else { return }
+        persist(context, save: save)
+    }
+
+    /// Drops the unsaved summary changes that a failed save left in the context.
+    func clearUnsaved(_ context: ModelContext) {
+        guard case .failed = saveState else { return }
+        context.rollback()
+        saveState = .idle
+    }
+
     private func encoded<T: AIOutput>(_ output: T) throws -> String {
         try output.validate()
-        let data = try JSONEncoder().encode(output)
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw AIServiceError.malformed("無法儲存 UTF-8 輸出")
-        }
-        return text
+        return try SummaryArchive.persist(output)
     }
 
     private func unique(_ values: [String]) -> [String] {

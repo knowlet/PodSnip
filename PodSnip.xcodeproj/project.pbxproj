@@ -30,6 +30,7 @@
 		F0AFC66749B1ECC9F63CFDD5 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB3B17879EE783A248AA10B2 /* KeychainStore.swift */; };
 		FB0CB1CFFA8E83DE789D3421 /* SummaryPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = E33D05CD16C15BF796FD2A46 /* SummaryPipeline.swift */; };
 		FDF747032B06F70547A1B8E3 /* RegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CD75AD85C65588A83DD894B /* RegressionTests.swift */; };
+		7A6C1E04B9D24F58A0C3E71B /* legacy-summary-v1.json in Resources */ = {isa = PBXBuildFile; fileRef = 2D8F05B6C1A749E3B54D90A8 /* legacy-summary-v1.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -76,6 +77,7 @@
 		E33D05CD16C15BF796FD2A46 /* SummaryPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SummaryPipeline.swift; sourceTree = "<group>"; };
 		E8124FE2A9067CCCA5A0BC8B /* SummaryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SummaryViews.swift; sourceTree = "<group>"; };
 		F2721261724CD0996FD9DFD4 /* RSSParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RSSParser.swift; sourceTree = "<group>"; };
+		2D8F05B6C1A749E3B54D90A8 /* legacy-summary-v1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/legacy-summary-v1.json"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -95,6 +97,7 @@
 				949D27CA67BAF7C3563EA7BB /* AIClientTransportTests.swift */,
 				93C98DF3059B72B8F31A6835 /* AIServiceTests.swift */,
 				9CD75AD85C65588A83DD894B /* RegressionTests.swift */,
+				2D8F05B6C1A749E3B54D90A8 /* legacy-summary-v1.json */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -151,6 +154,7 @@
 			buildConfigurationList = 6973FE47D7B74284C6AFAA13 /* Build configuration list for PBXNativeTarget "PodSnipTests" */;
 			buildPhases = (
 				D227AB1DA0B1931EBCACA40E /* Sources */,
+				E5C09A17D3B64F28A6E1C04D /* Resources */,
 			);
 			buildRules = (
 			);
@@ -240,6 +244,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		E5C09A17D3B64F28A6E1C04D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7A6C1E04B9D24F58A0C3E71B /* legacy-summary-v1.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		1B6791E2598E4E333E38EF5C /* Sources */ = {

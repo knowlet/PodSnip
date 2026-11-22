@@ -125,3 +125,166 @@ struct NoteOutput: AIOutput {
     var note: String
     func validate() throws { try requireAI(nonblank(note), "note") }
 }
+
+/// Persisted summary documents.
+///
+/// Version 2 is the strict contract written by the current pipeline. Version 1
+/// and documents with no `schemaVersion` are the unversioned JSON saved before
+/// that contract: missing detail, timestamp, summary, body, topic, and
+/// `open_questions` still decode, using the same defaults as the previous
+/// lenient reader. Provider ingestion does not use this path.
+enum SummaryArchive {
+    static let currentVersion = 2
+    static let legacyVersion = 1
+    private static let versionKey = "schemaVersion"
+
+    static func persist<T: Encodable>(_ value: T) throws -> String {
+        let encoded = try JSONEncoder().encode(value)
+        guard var object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] else {
+            throw AIServiceError.malformed("無法儲存版本化摘要")
+        }
+        object[versionKey] = currentVersion
+        let data = try JSONSerialization.data(withJSONObject: object)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw AIServiceError.malformed("無法儲存 UTF-8 輸出")
+        }
+        return text
+    }
+
+    static func takeaways(from json: String?) -> [TakeawayOutput]? {
+        guard let object = object(from: json) else { return nil }
+        switch generation(of: object) {
+        case .legacy:
+            return legacyTakeaways(object)
+        case .current:
+            return strict(TakeawaysOutput.self, json: json)?.takeaways
+        case .unsupported:
+            return nil
+        }
+    }
+
+    static func chapters(from json: String?) -> [Chapter]? {
+        guard let object = object(from: json) else { return nil }
+        switch generation(of: object) {
+        case .legacy:
+            return legacyChapters(object)
+        case .current:
+            return strict(ChaptersOutput.self, json: json)?.chapters.map {
+                Chapter(start: $0.start, title: $0.title, summary: $0.summary)
+            }
+        case .unsupported:
+            return nil
+        }
+    }
+
+    static func mindmap(from json: String?) -> MindNode? {
+        guard let object = object(from: json) else { return nil }
+        switch generation(of: object) {
+        case .legacy:
+            return legacyMindmap(object)
+        case .current:
+            guard let map = strict(MindmapOutput.self, json: json) else { return nil }
+            return MindNode(label: map.topic, children: map.branches.map { branch in
+                MindNode(label: branch.label, children: branch.children.map {
+                    MindNode(label: $0.label, children: nil)
+                })
+            })
+        case .unsupported:
+            return nil
+        }
+    }
+
+    static func insights(from json: String?) -> [(String, String)]? {
+        guard let object = object(from: json) else { return nil }
+        switch generation(of: object) {
+        case .legacy:
+            return legacyInsights(object)
+        case .current:
+            return strict(InsightsOutput.self, json: json)?.insights.map { ($0.title, $0.body) }
+        case .unsupported:
+            return nil
+        }
+    }
+
+    private enum DocumentGeneration { case legacy, current, unsupported }
+
+    private static func generation(of object: [String: Any]) -> DocumentGeneration {
+        switch schemaVersion(in: object) {
+        case nil:
+            return .legacy
+        case let version? where version == legacyVersion:
+            return .legacy
+        case let version? where version == currentVersion:
+            return .current
+        default:
+            return .unsupported
+        }
+    }
+
+    private static func strict<T: Decodable>(_ type: T.Type, json: String?) -> T? {
+        guard let data = json?.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    private static func object(from json: String?) -> [String: Any]? {
+        guard let data = json?.data(using: .utf8), !data.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object
+    }
+
+    private static func schemaVersion(in object: [String: Any]) -> Int? {
+        guard let number = object[versionKey] as? NSNumber, !isJSONBoolean(number) else { return nil }
+        return number.intValue
+    }
+
+    private static func legacyTakeaways(_ object: [String: Any]) -> [TakeawayOutput]? {
+        guard let rows = object["takeaways"] as? [[String: Any]] else { return nil }
+        return rows.compactMap { row in
+            guard let title = row["title"] as? String else { return nil }
+            return TakeawayOutput(title: title, detail: (row["detail"] as? String) ?? "", at: seconds(row["at"]) ?? 0)
+        }
+    }
+
+    private static func legacyChapters(_ object: [String: Any]) -> [Chapter]? {
+        guard let rows = object["chapters"] as? [[String: Any]] else { return nil }
+        return rows.compactMap { row in
+            guard let title = row["title"] as? String else { return nil }
+            return Chapter(start: seconds(row["start"]) ?? 0, title: title, summary: row["summary"] as? String)
+        }
+    }
+
+    private static func legacyMindmap(_ object: [String: Any]) -> MindNode {
+        func node(_ row: [String: Any]) -> MindNode {
+            let children = (row["children"] as? [[String: Any]])?.map(node)
+            return MindNode(label: (row["label"] as? String) ?? "", children: children)
+        }
+        let topic = (object["topic"] as? String).flatMap { nonblank($0) ? $0 : nil } ?? "主題"
+        let branches = (object["branches"] as? [[String: Any]])?.map(node) ?? []
+        return MindNode(label: topic, children: branches)
+    }
+
+    private static func legacyInsights(_ object: [String: Any]) -> [(String, String)]? {
+        guard let rows = object["insights"] as? [[String: Any]] else { return nil }
+        return rows.compactMap { row in
+            guard let title = row["title"] as? String else { return nil }
+            return (title, (row["body"] as? String) ?? "")
+        }
+    }
+
+    private static func seconds(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber, !isJSONBoolean(number) {
+            let double = number.doubleValue
+            return double.isFinite ? double : nil
+        }
+        if let text = value as? String {
+            let double = Double(text.trimmingCharacters(in: .whitespacesAndNewlines))
+            return double?.isFinite == true ? double : nil
+        }
+        return nil
+    }
+
+    private static func isJSONBoolean(_ number: NSNumber) -> Bool {
+        // JSON true/false are boolean singletons. Numeric 0 and 1 are not.
+        number === NSNumber(value: true) || number === NSNumber(value: false)
+    }
+}

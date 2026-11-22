@@ -52,32 +52,20 @@ struct SummaryView: View {
         }
     }
 
-    private func decoded<T: Decodable>(_ type: T.Type, from text: String?) -> T? {
-        guard let data = text?.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(type, from: data)
-    }
-
     func decodeTakeaways() -> [TakeawayOutput]? {
-        decoded(TakeawaysOutput.self, from: episode.takeawaysJSON)?.takeaways
+        SummaryArchive.takeaways(from: episode.takeawaysJSON)
     }
 
     func decodeChapters() -> [Chapter]? {
-        decoded(ChaptersOutput.self, from: episode.chaptersJSON)?.chapters.map {
-            Chapter(start: $0.start, title: $0.title, summary: $0.summary)
-        }
+        SummaryArchive.chapters(from: episode.chaptersJSON)
     }
 
     func decodeMindmap() -> MindNode? {
-        guard let map = decoded(MindmapOutput.self, from: episode.mindmapJSON) else { return nil }
-        return MindNode(label: map.topic, children: map.branches.map { branch in
-            MindNode(label: branch.label, children: branch.children.map {
-                MindNode(label: $0.label, children: nil)
-            })
-        })
+        SummaryArchive.mindmap(from: episode.mindmapJSON)
     }
 
     func decodeInsights() -> [(String, String)]? {
-        decoded(InsightsOutput.self, from: episode.insightsJSON)?.insights.map { ($0.title, $0.body) }
+        SummaryArchive.insights(from: episode.insightsJSON)
     }
 }
 
@@ -173,7 +161,12 @@ struct SnipListView: View {
                     Text(snip.text).font(.subheadline).lineLimit(4)
                     if let note = snip.aiNote { Text(displayedSnipNote(note)).font(.caption).foregroundStyle(.purple) }
                     if let error = snip.aiError {
-                        Text("AI 筆記失敗：\(error)").font(.caption).foregroundStyle(.orange)
+                        Text(UserFacingAIError.shareLine(stored: error)).font(.caption).foregroundStyle(.orange)
+                        HStack {
+                            Button("重試") { Task { await Snack.shared.retryNote(snip) } }
+                            Button("清除") { Snack.shared.clearFailure(snip) }
+                        }
+                        .font(.caption)
                     }
                     ShareLink(item: markdown(for: snip), preview: SharePreview("分享擷取")) {
                         Label("分享", systemImage: "square.and.arrow.up").font(.caption)
@@ -192,6 +185,12 @@ struct SnipListView: View {
     }
 
     func markdown(for s: Snip) -> String {
-        "# Snip — \(s.episodeTitle)\n\n⏱ \(fmtTime(s.atTime))\n\n> \(s.text)\n\n\(s.aiNote.map(displayedSnipNote) ?? "")\n\(s.aiError.map { "AI 筆記失敗：\($0)" } ?? "")\n"
+        snipShareMarkdown(episodeTitle: s.episodeTitle, atTime: s.atTime, text: s.text, aiNote: s.aiNote, aiError: s.aiError)
     }
+}
+
+func snipShareMarkdown(episodeTitle: String, atTime: Double, text: String, aiNote: String?, aiError: String?) -> String {
+    let note = aiNote.map(displayedSnipNote) ?? ""
+    let failure = UserFacingAIError.shareLine(stored: aiError)
+    return "# Snip — \(episodeTitle)\n\n⏱ \(fmtTime(atTime))\n\n> \(text)\n\n\(note)\n\(failure)\n"
 }

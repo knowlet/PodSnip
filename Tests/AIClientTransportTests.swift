@@ -110,7 +110,13 @@ final class AIClientTransportTests: XCTestCase {
         } catch AIError.http(let status, let body) {
             XCTAssertEqual(status, 429)
             XCTAssertEqual(body, "synthetic rate limit")
+            let described = AIError.http(status, body).localizedDescription
+            XCTAssertEqual(described, "AI 請求失敗 HTTP 429。")
+            XCTAssertFalse(described.contains(body))
         } catch { XCTFail("Expected HTTP error, got \(error)") }
+        let decoded = AIError.decode(#"{"secret":"synthetic raw provider body"}"#)
+        XCTAssertEqual(decoded.localizedDescription, "AI 回傳解析失敗。")
+        XCTAssertFalse(decoded.localizedDescription.contains("secret"))
         XCTAssertEqual(fixture.requests.count, 1)
     }
 

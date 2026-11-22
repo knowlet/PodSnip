@@ -68,14 +68,23 @@ struct PlayerView: View {
                     Task {
                         let service = ApplicationAIService(config: .load())
                         await pipeline.runAll(episode: episode, service: service)
-                        do { try context.save() }
-                        catch { pipeline.stage = "儲存失敗：\(error.localizedDescription)" }
+                        pipeline.persist(context)
                     }
                 }
                 .disabled(pipeline.running || !episode.hasTranscript)
             }
             .buttonStyle(.bordered)
             .font(.caption)
+            if case .failed(let message) = pipeline.saveState {
+                VStack(spacing: 4) {
+                    Text(message).font(.caption).foregroundStyle(.red)
+                    HStack {
+                        Button("重試儲存") { pipeline.retryPersist(context) }
+                        Button("清除未儲存變更") { pipeline.clearUnsaved(context) }
+                    }
+                    .font(.caption)
+                }
+            }
             if !pipeline.stage.isEmpty {
                 Text(pipeline.stage).font(.caption)
                     .foregroundStyle(pipeline.stage.hasPrefix("失敗") ? Color.red : Color.secondary)
@@ -130,7 +139,8 @@ struct PlayerView: View {
         let snip = await Snack.shared.snip(episodeID: episode.id, title: episode.title)
         snipFailed = snip == nil || snip?.aiError != nil
         if let snip {
-            snipFlash = snip.aiError.map { "已擷取；AI 筆記失敗：\($0)" } ?? "已擷取 ✓"
+            let failure = UserFacingAIError.shareLine(stored: snip.aiError)
+            snipFlash = failure.isEmpty ? "已擷取 ✓" : "已擷取；\(failure)"
         } else {
             snipFlash = "擷取儲存失敗，請重試"
         }
@@ -147,6 +157,9 @@ final class Snack {
 
     init(context: ModelContext? = nil) { self.context = context }
 
+    /// Test hook. Production uses `ModelContext.save()`.
+    var saveChanges: (ModelContext) throws -> Void = { try $0.save() }
+
     @discardableResult
     func snip(episodeID: UUID, title: String, service: ApplicationAIService? = nil,
               captureTime: Double? = nil) async -> Snip? {
@@ -162,20 +175,88 @@ final class Snack {
         let snip = Snip(episodeID: episodeID, episodeTitle: title, atTime: time, text: text)
         ctx.insert(snip)
         // Raw capture is durable before any provider is contacted.
-        do { try ctx.save() }
-        catch { return nil }
+        do { try saveChanges(ctx) }
+        catch {
+            discardUnsavedInsert(snip, in: ctx)
+            return nil
+        }
 
+        let note: Result<String, Error>
         do {
             guard hasText else { throw AIServiceError.context("擷取已儲存，但附近沒有逐字稿可產生筆記") }
-            snip.aiNote = try await selectedService.note(segment: text).note
+            note = .success(try await selectedService.note(segment: text).note)
         } catch {
-            snip.aiError = error.localizedDescription
+            note = .failure(error)
         }
-        do { try ctx.save() }
-        catch { snip.aiError = "AI 筆記儲存失敗：\(error.localizedDescription)" }
-        return snip
+        return commit(note, to: snip, in: ctx)
+    }
+
+    func retryNote(_ snip: Snip, service: ApplicationAIService? = nil) async {
+        guard let ctx = context else { return }
+        let selected = service ?? ApplicationAIService(config: .load())
+        let trimmed = snip.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let note: Result<String, Error>
+        if trimmed.isEmpty || trimmed == "（無逐字稿）" {
+            note = .failure(AIServiceError.context("擷取已儲存，但附近沒有逐字稿可產生筆記"))
+        } else {
+            do { note = .success(try await selected.note(segment: snip.text).note) }
+            catch { note = .failure(error) }
+        }
+        _ = commit(note, to: snip, in: ctx)
+    }
+
+    /// Clears a persisted note failure. A failed clear rolls back to that failure
+    /// instead of leaving an unsaved blank error.
+    @discardableResult
+    func clearFailure(_ snip: Snip) -> Bool {
+        guard let ctx = context, snip.aiError != nil else { return false }
+        snip.aiError = nil
+        do {
+            try saveChanges(ctx)
+            return true
+        } catch {
+            ctx.rollback()
+            return false
+        }
+    }
+
+    private func commit(_ note: Result<String, Error>, to snip: Snip, in context: ModelContext) -> Snip? {
+        apply(note, to: snip)
+        do {
+            try saveChanges(context)
+            return snip
+        } catch {
+            // Replace the unsaved note with a failed state and save that. A second
+            // failure rolls back to the last successful capture instead of leaving
+            // the note write pending.
+            apply(.failure(SnipSaveFailure()), to: snip)
+            do {
+                try saveChanges(context)
+                return snip
+            } catch {
+                context.rollback()
+                return nil
+            }
+        }
+    }
+
+    private func apply(_ note: Result<String, Error>, to snip: Snip) {
+        switch note {
+        case .success(let text):
+            snip.aiNote = text
+            snip.aiError = nil
+        case .failure(let error):
+            snip.aiNote = nil
+            snip.aiError = (error is SnipSaveFailure) ? UserFacingAIError.saveFailure() : UserFacingAIError.message(for: error)
+        }
+    }
+
+    private func discardUnsavedInsert(_ snip: Snip, in context: ModelContext) {
+        context.delete(snip)
     }
 }
+
+private struct SnipSaveFailure: Error {}
 
 struct TranscriptListView: View {
     var episode: EpisodeItem

@@ -7,15 +7,63 @@ enum AIError: LocalizedError {
     case emptyResponse
     case decode(String)
 
-    var errorDescription: String? {
+    /// User-facing text. The associated HTTP/decode payloads stay on the error
+    /// for transport diagnostics and are never copied into this string.
+    var safeDescription: String {
         switch self {
         case .notConfigured: return "請先在設定裡填入 AI Base URL、API Key 和模型。"
         case .badURL: return "Base URL 格式錯誤。"
-        case .http(let code, let body): return "AI 請求失敗 HTTP \(code)：\(body.prefix(200))"
+        case .http(let code, _): return "AI 請求失敗 HTTP \(code)。"
         case .emptyResponse: return "AI 回傳為空。"
-        case .decode(let s): return "AI 回傳解析失敗：\(s.prefix(160))"
+        case .decode: return "AI 回傳解析失敗。"
         }
     }
+
+    var errorDescription: String? { safeDescription }
+}
+
+/// Messages that can be stored on a Snip or placed in share text.
+enum UserFacingAIError {
+    static func message(for error: Error) -> String {
+        if let ai = error as? AIError { return ai.safeDescription }
+        if error is AIServiceError { return error.localizedDescription }
+        return "AI 筆記失敗。"
+    }
+
+    static func saveFailure() -> String { "AI 筆記儲存失敗。" }
+
+    /// Share text is limited to messages this app generates. A stored provider
+    /// body, including an older `HTTP n：<raw body>` string, becomes a fixed line.
+    static func shareLine(stored: String?) -> String {
+        guard let stored else { return "" }
+        let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        guard isSafeSummary(trimmed) else { return "AI 筆記失敗。" }
+        return "AI 筆記失敗：\(trimmed)"
+    }
+
+    private static func isSafeSummary(_ text: String) -> Bool {
+        if text.contains("{") || text.contains("}") || text.contains("<") || text.contains(">") { return false }
+        if text.localizedCaseInsensitiveContains("bearer ") || text.contains("sk-") { return false }
+        let range = NSRange(text.startIndex..., in: text)
+        return safePatterns.contains { $0.firstMatch(in: text, options: [], range: range) != nil }
+    }
+
+    private static let safePatterns: [NSRegularExpression] = [
+        #"^請先在設定裡填入 AI Base URL、API Key 和模型。$"#,
+        #"^Base URL 格式錯誤。$"#,
+        #"^AI 請求失敗 HTTP \d+。$"#,
+        #"^AI 回傳為空。$"#,
+        #"^AI 回傳解析失敗。$"#,
+        #"^AI 暫不可用：.+$"#,
+        #"^AI 上下文超出限制：.+$"#,
+        #"^AI 輸出格式錯誤：.+$"#,
+        #"^Apple 雲端配額已達上限：.+$"#,
+        #"^Apple 雲端網路失敗：.+$"#,
+        #"^Apple 雲端服務暫不可用：.+$"#,
+        #"^AI 筆記儲存失敗。$"#,
+        #"^儲存失敗。$"#,
+    ].compactMap { try? NSRegularExpression(pattern: $0) }
 }
 
 /// OpenAI-compatible chat client (OpenAI / Anthropic-compat / Gemini-compat / OpenRouter).
