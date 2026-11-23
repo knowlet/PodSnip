@@ -210,13 +210,13 @@ enum SummaryArchive {
 
     private static func generation(of object: [String: Any]) -> DocumentGeneration {
         switch schemaVersion(in: object) {
-        case nil:
+        case .absent:
             return .legacy
-        case let version? where version == legacyVersion:
+        case .number(let version) where version == legacyVersion:
             return .legacy
-        case let version? where version == currentVersion:
+        case .number(let version) where version == currentVersion:
             return .current
-        default:
+        case .invalid, .number:
             return .unsupported
         }
     }
@@ -232,9 +232,22 @@ enum SummaryArchive {
         return object
     }
 
-    private static func schemaVersion(in object: [String: Any]) -> Int? {
-        guard let number = object[versionKey] as? NSNumber, !isJSONBoolean(number) else { return nil }
-        return number.intValue
+    private enum VersionToken {
+        case absent
+        case invalid
+        case number(Int)
+    }
+
+    /// Missing `schemaVersion` is the historical document. A present value must be
+    /// an integer; booleans, fractions, and strings are not coerced into v1 or v2.
+    private static func schemaVersion(in object: [String: Any]) -> VersionToken {
+        guard object.keys.contains(versionKey) else { return .absent }
+        guard let number = object[versionKey] as? NSNumber, !isJSONBoolean(number) else { return .invalid }
+        let value = number.doubleValue
+        guard value.isFinite, value >= 0, value <= Double(Int.max), value.rounded(.towardZero) == value else {
+            return .invalid
+        }
+        return .number(Int(value))
     }
 
     private static func legacyTakeaways(_ object: [String: Any]) -> [TakeawayOutput]? {
@@ -284,7 +297,8 @@ enum SummaryArchive {
     }
 
     private static func isJSONBoolean(_ number: NSNumber) -> Bool {
-        // JSON true/false are boolean singletons. Numeric 0 and 1 are not.
-        number === NSNumber(value: true) || number === NSNumber(value: false)
+        // JSON true/false use the boolean Objective-C type code. JSON 0 and 1 do not.
+        let code = String(cString: number.objCType)
+        return code == "c" || code == "B"
     }
 }

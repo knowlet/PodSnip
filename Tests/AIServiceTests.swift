@@ -293,7 +293,9 @@ final class AIServiceTests: XCTestCase {
             ("malformed", LanguageModelSession.GenerationError.decodingFailure(.init(debugDescription: "synthetic decoding failure")))
         ]
         for (kind, error) in errors {
-            await assertAIError(kind) { throw AppleAIProvider.mapError(error) }
+            let mapped = AppleAIProvider.mapError(error)
+            await assertAIError(kind) { throw mapped }
+            XCTAssertFalse(mapped.localizedDescription.contains("synthetic"))
         }
     }
 
@@ -308,7 +310,9 @@ final class AIServiceTests: XCTestCase {
             ("context", LanguageModelError.contextSizeExceeded(.init(contextSize: 4096, tokenCount: 4097, debugDescription: "synthetic context")))
         ]
         for (kind, error) in errors {
-            await assertAIError(kind) { throw AppleAIProvider.mapError(error) }
+            let mapped = AppleAIProvider.mapError(error)
+            await assertAIError(kind) { throw mapped }
+            XCTAssertFalse(mapped.localizedDescription.contains("synthetic"))
         }
         let noReset = AppleAIProvider.mapError(errors[2].1).localizedDescription
         XCTAssertTrue(noReset.contains("未提供重置時間"), noReset)
@@ -468,6 +472,9 @@ final class AIServiceTests: XCTestCase {
         XCTAssertNil(SummaryArchive.takeaways(from: incompleteCurrent))
         let future = #"{"schemaVersion":3,"takeaways":[{"title":"未來"}]}"#
         XCTAssertNil(SummaryArchive.takeaways(from: future))
+        XCTAssertNil(SummaryArchive.takeaways(from: #"{"schemaVersion":2.5,"takeaways":[{"title":"分數","detail":"說明","at":1}]}"#))
+        XCTAssertNil(SummaryArchive.takeaways(from: #"{"schemaVersion":"2","takeaways":[{"title":"字串"}]}"#))
+        XCTAssertNil(SummaryArchive.takeaways(from: #"{"schemaVersion":true,"takeaways":[{"title":"布林"}]}"#))
 
         let persisted = try SummaryArchive.persist(TakeawaysOutput(takeaways: [
             TakeawayOutput(title: "新要點", detail: "完整", at: 4)
@@ -496,18 +503,21 @@ final class AIServiceTests: XCTestCase {
         try context.save()
         let pipeline = SummaryPipeline()
 
+        pipeline.rememberSummaryBaseline(episode)
         episode.summaryMarkdown = "Unsaved replacement"
         episode.takeawaysJSON = "unsaved"
+        episode.localAudioPath = "unsaved-audio-edit"
         pipeline.persist(context, save: { _ in throw SyntheticSaveFailure() })
 
         XCTAssertEqual(pipeline.saveState, .failed("儲存失敗。"))
         XCTAssertNotEqual(pipeline.saveState, .pending)
         XCTAssertTrue(context.hasChanges)
-        pipeline.clearUnsaved(context)
+        pipeline.clearUnsaved(episode)
         XCTAssertEqual(pipeline.saveState, .idle)
         XCTAssertEqual(episode.summaryMarkdown, "Existing summary")
         XCTAssertNil(episode.takeawaysJSON)
-        XCTAssertFalse(context.hasChanges)
+        XCTAssertEqual(episode.localAudioPath, "unsaved-audio-edit")
+        XCTAssertTrue(context.hasChanges)
 
         episode.summaryMarkdown = "Retry me"
         pipeline.persist(context, save: { _ in throw SyntheticSaveFailure() })
@@ -517,9 +527,9 @@ final class AIServiceTests: XCTestCase {
         XCTAssertFalse(context.hasChanges)
 
         episode.summaryMarkdown = "Still pending edit"
-        pipeline.clearUnsaved(context)
+        pipeline.clearUnsaved(episode)
         XCTAssertEqual(episode.summaryMarkdown, "Still pending edit")
-        XCTAssertTrue(context.hasChanges)
+        XCTAssertEqual(episode.localAudioPath, "unsaved-audio-edit")
     }
 
     func testFailedSnipSaveIsClearedAndCanBeRetried() async throws {
@@ -562,17 +572,19 @@ final class AIServiceTests: XCTestCase {
 
         let snip = try XCTUnwrap(await snack.snip(episodeID: episode.id, title: episode.title, service: service, captureTime: 2))
 
-        XCTAssertNil(snip.aiNote)
+        XCTAssertEqual(snip.aiNote, "Synthetic parsed note")
         XCTAssertEqual(snip.aiError, "AI 筆記儲存失敗。")
         XCTAssertFalse(context.hasChanges)
+        XCTAssertEqual(provider.requests.count, 1)
         let persisted = try context.fetch(FetchDescriptor<Snip>())
         XCTAssertEqual(persisted.first?.aiError, "AI 筆記儲存失敗。")
-        XCTAssertNil(persisted.first?.aiNote)
+        XCTAssertEqual(persisted.first?.aiNote, "Synthetic parsed note")
 
         snack.saveChanges = { try $0.save() }
         await snack.retryNote(snip, service: service)
         XCTAssertEqual(snip.aiNote, "Synthetic parsed note")
         XCTAssertNil(snip.aiError)
+        XCTAssertEqual(provider.requests.count, 1)
         XCTAssertFalse(context.hasChanges)
 
         snip.aiError = "AI 筆記儲存失敗。"
@@ -583,10 +595,11 @@ final class AIServiceTests: XCTestCase {
 
         snip.aiError = "AI 筆記儲存失敗。"
         try context.save()
+        episode.localAudioPath = "keep-this-edit"
         snack.saveChanges = { _ in throw SyntheticSaveFailure() }
         XCTAssertFalse(snack.clearFailure(snip))
         XCTAssertEqual(snip.aiError, "AI 筆記儲存失敗。")
-        XCTAssertFalse(context.hasChanges)
+        XCTAssertEqual(episode.localAudioPath, "keep-this-edit")
     }
 
     func testSnipShareOmitsProviderResponseBody() async throws {
@@ -616,6 +629,15 @@ final class AIServiceTests: XCTestCase {
         XCTAssertEqual(leaked.contains("AI 筆記失敗。"), true)
         XCTAssertFalse(leaked.contains("synthetic rate limit"))
         XCTAssertFalse(leaked.contains("429："))
+
+        let debug = "Apple 雲端網路失敗：Error Domain=PCC raw provider body"
+        let redacted = snipShareMarkdown(episodeTitle: "合成", atTime: 1, text: "合成片段", aiNote: nil, aiError: debug)
+        XCTAssertEqual(redacted.contains("AI 筆記失敗。"), true)
+        XCTAssertFalse(redacted.contains("raw provider body"))
+        XCTAssertFalse(redacted.contains("Domain"))
+        let safe = snipShareMarkdown(episodeTitle: "合成", atTime: 1, text: "合成片段", aiNote: nil,
+                                     aiError: "Apple 雲端網路失敗：連線失敗")
+        XCTAssertTrue(safe.contains("連線失敗"))
     }
 
     func testLegacySnipJSONDisplaysParsedNoteAndPlainTextRemainsReadable() {

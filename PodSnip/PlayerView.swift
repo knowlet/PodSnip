@@ -80,7 +80,7 @@ struct PlayerView: View {
                     Text(message).font(.caption).foregroundStyle(.red)
                     HStack {
                         Button("重試儲存") { pipeline.retryPersist(context) }
-                        Button("清除未儲存變更") { pipeline.clearUnsaved(context) }
+                        Button("清除未儲存變更") { pipeline.clearUnsaved(episode) }
                     }
                     .font(.caption)
                 }
@@ -193,6 +193,12 @@ final class Snack {
 
     func retryNote(_ snip: Snip, service: ApplicationAIService? = nil) async {
         guard let ctx = context else { return }
+        if snip.aiError == UserFacingAIError.saveFailure(), let note = snip.aiNote, !note.isEmpty {
+            snip.aiError = nil
+            do { try saveChanges(ctx) }
+            catch { snip.aiError = UserFacingAIError.saveFailure() }
+            return
+        }
         let selected = service ?? ApplicationAIService(config: .load())
         let trimmed = snip.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let note: Result<String, Error>
@@ -205,49 +211,47 @@ final class Snack {
         _ = commit(note, to: snip, in: ctx)
     }
 
-    /// Clears a persisted note failure. A failed clear rolls back to that failure
-    /// instead of leaving an unsaved blank error.
+    /// Clears a persisted note failure. A failed clear puts that failure back on
+    /// the snip and leaves other unsaved edits alone.
     @discardableResult
     func clearFailure(_ snip: Snip) -> Bool {
-        guard let ctx = context, snip.aiError != nil else { return false }
+        guard let ctx = context, let previous = snip.aiError else { return false }
         snip.aiError = nil
         do {
             try saveChanges(ctx)
             return true
         } catch {
-            ctx.rollback()
+            snip.aiError = previous
             return false
         }
     }
 
     private func commit(_ note: Result<String, Error>, to snip: Snip, in context: ModelContext) -> Snip? {
-        apply(note, to: snip)
-        do {
-            try saveChanges(context)
-            return snip
-        } catch {
-            // Replace the unsaved note with a failed state and save that. A second
-            // failure rolls back to the last successful capture instead of leaving
-            // the note write pending.
-            apply(.failure(SnipSaveFailure()), to: snip)
-            do {
-                try saveChanges(context)
-                return snip
-            } catch {
-                context.rollback()
-                return nil
-            }
-        }
-    }
-
-    private func apply(_ note: Result<String, Error>, to snip: Snip) {
+        let generatedNote: String?
         switch note {
         case .success(let text):
             snip.aiNote = text
             snip.aiError = nil
+            generatedNote = text
         case .failure(let error):
             snip.aiNote = nil
-            snip.aiError = (error is SnipSaveFailure) ? UserFacingAIError.saveFailure() : UserFacingAIError.message(for: error)
+            snip.aiError = UserFacingAIError.message(for: error)
+            generatedNote = nil
+        }
+        do {
+            try saveChanges(context)
+            return snip
+        } catch {
+            // Keep a note the provider already returned. Record the save failure
+            // without rolling back unrelated edits in this context.
+            if let generatedNote { snip.aiNote = generatedNote }
+            snip.aiError = UserFacingAIError.saveFailure()
+            do {
+                try saveChanges(context)
+                return snip
+            } catch {
+                return snip
+            }
         }
     }
 
@@ -255,8 +259,6 @@ final class Snack {
         context.delete(snip)
     }
 }
-
-private struct SnipSaveFailure: Error {}
 
 struct TranscriptListView: View {
     var episode: EpisodeItem

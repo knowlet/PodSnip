@@ -43,27 +43,54 @@ enum UserFacingAIError {
     }
 
     private static func isSafeSummary(_ text: String) -> Bool {
-        if text.contains("{") || text.contains("}") || text.contains("<") || text.contains(">") { return false }
-        if text.localizedCaseInsensitiveContains("bearer ") || text.contains("sk-") { return false }
-        let range = NSRange(text.startIndex..., in: text)
-        return safePatterns.contains { $0.firstMatch(in: text, options: [], range: range) != nil }
+        if exactMessages.contains(text) { return true }
+        guard let prefix = detailPrefixes.first(where: { text.hasPrefix($0) }) else { return false }
+        let suffix = text.dropFirst(prefix.count)
+        guard !suffix.isEmpty, suffix.count <= 80 else { return false }
+        return isSafeDetail(suffix)
     }
 
-    private static let safePatterns: [NSRegularExpression] = [
-        #"^請先在設定裡填入 AI Base URL、API Key 和模型。$"#,
-        #"^Base URL 格式錯誤。$"#,
-        #"^AI 請求失敗 HTTP \d+。$"#,
-        #"^AI 回傳為空。$"#,
-        #"^AI 回傳解析失敗。$"#,
-        #"^AI 暫不可用：.+$"#,
-        #"^AI 上下文超出限制：.+$"#,
-        #"^AI 輸出格式錯誤：.+$"#,
-        #"^Apple 雲端配額已達上限：.+$"#,
-        #"^Apple 雲端網路失敗：.+$"#,
-        #"^Apple 雲端服務暫不可用：.+$"#,
-        #"^AI 筆記儲存失敗。$"#,
-        #"^儲存失敗。$"#,
-    ].compactMap { try? NSRegularExpression(pattern: $0) }
+    /// Details are app-authored Chinese, digits, and a few fixed tokens.
+    /// Provider and SDK debug text is Latin prose and does not pass.
+    private static func isSafeDetail<S: StringProtocol>(_ suffix: S) -> Bool {
+        var rest = Substring(suffix)
+        while !rest.isEmpty {
+            if rest.hasPrefix("Apple") {
+                rest = rest.dropFirst(5)
+                continue
+            }
+            if rest.hasPrefix("tokens") {
+                rest = rest.dropFirst(6)
+                continue
+            }
+            let character = rest.removeFirst()
+            if character.isNumber || character.isWhitespace { continue }
+            if character == "T" || character == "Z" { continue }
+            if "，。、：；；（）()/-:".contains(character) { continue }
+            if character >= "\u{4e00}", character <= "\u{9fff}" { continue }
+            return false
+        }
+        return true
+    }
+
+    private static let exactMessages: Set<String> = [
+        "請先在設定裡填入 AI Base URL、API Key 和模型。",
+        "Base URL 格式錯誤。",
+        "AI 回傳為空。",
+        "AI 回傳解析失敗。",
+        "AI 筆記儲存失敗。",
+        "儲存失敗。",
+    ]
+
+    private static let detailPrefixes = [
+        "AI 請求失敗 HTTP ",
+        "AI 暫不可用：",
+        "AI 上下文超出限制：",
+        "AI 輸出格式錯誤：",
+        "Apple 雲端配額已達上限：",
+        "Apple 雲端網路失敗：",
+        "Apple 雲端服務暫不可用：",
+    ]
 }
 
 /// OpenAI-compatible chat client (OpenAI / Anthropic-compat / Gemini-compat / OpenRouter).

@@ -45,7 +45,7 @@ struct ApplicationAIService {
         let data = try await provider.structured(req, kind: type.kind)
         let result: Output
         do { result = try JSONDecoder().decode(type, from: data) }
-        catch { throw AIServiceError.malformed("\(type.kind.rawValue)：\(error.localizedDescription)") }
+        catch { throw AIServiceError.malformed("格式無法解讀") }
         try result.validate()
         return result
     }

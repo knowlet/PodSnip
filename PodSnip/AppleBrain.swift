@@ -155,8 +155,8 @@ struct AppleAIProvider: AIProvider {
                 case .quotaLimitReached(let context):
                     return AIServiceError.quota(quotaMessage(resetDate: context.resetDate,
                         hasSuggestion: context.limitIncreaseSuggestion != nil))
-                case .networkFailure(let context): return AIServiceError.network(context.debugDescription)
-                case .serviceUnavailable(let context): return AIServiceError.service(context.debugDescription)
+                case .networkFailure: return AIServiceError.network("連線失敗")
+                case .serviceUnavailable: return AIServiceError.service("服務暫不可用")
                 @unknown default: return error
                 }
             }
@@ -170,8 +170,8 @@ struct AppleAIProvider: AIProvider {
         if #available(iOS 26, *), let generation = error as? LanguageModelSession.GenerationError {
             switch generation {
             case .exceededContextWindowSize: return AIServiceError.context("Apple 回報超出上下文限制；請縮小片段")
-            case .assetsUnavailable: return AIServiceError.unavailable(error.localizedDescription)
-            case .decodingFailure: return AIServiceError.malformed(error.localizedDescription)
+            case .assetsUnavailable: return AIServiceError.unavailable("模型資源不可用")
+            case .decodingFailure: return AIServiceError.malformed("輸出無法解讀")
             default: return error
             }
         }

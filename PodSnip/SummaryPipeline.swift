@@ -7,17 +7,44 @@ enum SummarySaveState: Equatable {
     case failed(String)
 }
 
+struct SummaryFieldSnapshot {
+    var summaryMarkdown: String?
+    var takeawaysJSON: String?
+    var chaptersJSON: String?
+    var mindmapJSON: String?
+    var insightsJSON: String?
+
+    init(_ episode: EpisodeItem) {
+        summaryMarkdown = episode.summaryMarkdown
+        takeawaysJSON = episode.takeawaysJSON
+        chaptersJSON = episode.chaptersJSON
+        mindmapJSON = episode.mindmapJSON
+        insightsJSON = episode.insightsJSON
+    }
+
+    func restore(_ episode: EpisodeItem) {
+        episode.summaryMarkdown = summaryMarkdown
+        episode.takeawaysJSON = takeawaysJSON
+        episode.chaptersJSON = chaptersJSON
+        episode.mindmapJSON = mindmapJSON
+        episode.insightsJSON = insightsJSON
+    }
+}
+
 /// Processes every supplied transcript chunk with one immutable provider selection.
 @MainActor
 final class SummaryPipeline: ObservableObject {
     @Published var stage: String = ""
     @Published var running = false
     @Published private(set) var saveState: SummarySaveState = .idle
+    private var summaryBaseline: SummaryFieldSnapshot?
+    private var summaryEpisodeID: UUID?
 
     func runAll(episode: EpisodeItem, service: ApplicationAIService) async {
         guard !running else { return }
         running = true
         defer { running = false }
+        rememberSummaryBaseline(episode)
         guard !episode.segments.isEmpty else { stage = "沒有逐字稿，先轉寫"; return }
 
         stage = "準備逐字稿…"
@@ -95,11 +122,20 @@ final class SummaryPipeline: ObservableObject {
 
     /// Writes the in-memory summary. A thrown save moves to `.failed` and keeps
     /// the unsaved changes so they can be retried; it does not stay `.pending`.
+    /// Records the summary fields before a new publish. A failed save keeps this
+    /// baseline so clear can restore it without rolling back the whole context.
+    func rememberSummaryBaseline(_ episode: EpisodeItem) {
+        guard saveState != .failed else { return }
+        summaryEpisodeID = episode.id
+        summaryBaseline = SummaryFieldSnapshot(episode)
+    }
+
     func persist(_ context: ModelContext, save: (ModelContext) throws -> Void = { try $0.save() }) {
         saveState = .pending
         do {
             try save(context)
             saveState = .idle
+            summaryBaseline = nil
         } catch {
             saveState = .failed("儲存失敗。")
         }
@@ -110,10 +146,14 @@ final class SummaryPipeline: ObservableObject {
         persist(context, save: save)
     }
 
-    /// Drops the unsaved summary changes that a failed save left in the context.
-    func clearUnsaved(_ context: ModelContext) {
-        guard case .failed = saveState else { return }
-        context.rollback()
+    /// Restores the summary fields captured before the failed publish.
+    /// Other unsaved edits in the context stay in place.
+    func clearUnsaved(_ episode: EpisodeItem) {
+        guard case .failed = saveState,
+              episode.id == summaryEpisodeID,
+              let summaryBaseline else { return }
+        summaryBaseline.restore(episode)
+        self.summaryBaseline = nil
         saveState = .idle
     }
 
