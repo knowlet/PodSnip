@@ -13,6 +13,10 @@ targets:
           - Info.plist
     info:
       path: PodSnip/Info.plist
+      properties:
+        NSSpeechRecognitionUsageDescription: 將下載的 Podcast 音檔轉成逐字稿，方便搜尋與擷取重點。
+        UIBackgroundModes:
+          - audio
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.podsnip.app
@@ -21,3 +25,40 @@ targets:
         SWIFT_VERSION: "5.0"
         CODE_SIGNING_ALLOWED: "NO"
         DEVELOPMENT_TEAM: ""
+  PodSnipTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: PodSnip
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.podsnip.tests
+        GENERATE_INFOPLIST_FILE: "YES"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+  PodSnipUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: PodSnip
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.podsnip.uitests
+        GENERATE_INFOPLIST_FILE: "YES"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+schemes:
+  PodSnip:
+    build:
+      targets:
+        PodSnip: all
+    test:
+      targets:
+        - PodSnipTests
+        - PodSnipUITests

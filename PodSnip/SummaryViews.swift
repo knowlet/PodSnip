@@ -18,7 +18,8 @@ struct SummaryView: View {
                         ForEach(items.indices, id: \.self) { i in
                             VStack(alignment: .leading) {
                                 Text(items[i].title).font(.subheadline).bold()
-                                if let d = items[i].detail { Text(d).font(.caption).foregroundStyle(.secondary) }
+                                Text(items[i].detail).font(.caption).foregroundStyle(.secondary)
+                                Text(fmtTime(items[i].at)).font(.caption2).foregroundStyle(.blue)
                             }
                         }
                     }
@@ -51,45 +52,20 @@ struct SummaryView: View {
         }
     }
 
-    struct Takeaway: Decodable { var title: String; var detail: String? }
-    func decodeTakeaways() -> [Takeaway]? {
-        guard let s = episode.takeawaysJSON, let d = s.data(using: .utf8),
-              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-              let arr = j["takeaways"] as? [[String: Any]] else { return nil }
-        return arr.compactMap { o in
-            guard let t = o["title"] as? String else { return nil }
-            return Takeaway(title: t, detail: o["detail"] as? String)
-        }
+    func decodeTakeaways() -> [TakeawayOutput]? {
+        SummaryArchive.takeaways(from: episode.takeawaysJSON)
     }
+
     func decodeChapters() -> [Chapter]? {
-        guard let s = episode.chaptersJSON, let d = s.data(using: .utf8),
-              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-              let arr = j["chapters"] as? [[String: Any]] else { return nil }
-        return arr.compactMap { o in
-            guard let t = o["title"] as? String else { return nil }
-            let start = (o["start"] as? Double) ?? Double(o["start"] as? Int ?? 0)
-            return Chapter(start: start, title: t, summary: o["summary"] as? String)
-        }
+        SummaryArchive.chapters(from: episode.chaptersJSON)
     }
+
     func decodeMindmap() -> MindNode? {
-        guard let s = episode.mindmapJSON, let d = s.data(using: .utf8),
-              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
-        func node(_ o: [String: Any]) -> MindNode {
-            let kids = (o["children"] as? [[String: Any]])?.map(node)
-            return MindNode(label: (o["label"] as? String) ?? "", children: kids)
-        }
-        let topic = (j["topic"] as? String) ?? "主題"
-        let branches = (j["branches"] as? [[String: Any]])?.map(node) ?? []
-        return MindNode(label: topic, children: branches)
+        SummaryArchive.mindmap(from: episode.mindmapJSON)
     }
+
     func decodeInsights() -> [(String, String)]? {
-        guard let s = episode.insightsJSON, let d = s.data(using: .utf8),
-              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-              let arr = j["insights"] as? [[String: Any]] else { return nil }
-        return arr.compactMap { o in
-            guard let t = o["title"] as? String else { return nil }
-            return (t, (o["body"] as? String) ?? "")
-        }
+        SummaryArchive.insights(from: episode.insightsJSON)
     }
 }
 
@@ -133,30 +109,41 @@ struct ChatView: View {
                 Button("送出") {
                     Task { await ask() }
                 }
-                .disabled(input.isEmpty || thinking || !episode.hasTranscript)
+                .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || thinking || !episode.hasTranscript)
             }
             .padding()
         }
         .onAppear {
             if messages.isEmpty {
-                messages.append((false, "我是這集的 AI 助手，問我任何內容（會附時間引用）。"))
+                messages.append((false, "回答只根據每次選取的逐字稿片段，會顯示引用與涵蓋範圍；逐字稿以外的內容無法確認。"))
             }
         }
     }
 
     func ask() async {
-        let q = input; input = ""; thinking = true
-        messages.append((true, q))
+        let question = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty, !thinking else { return }
+        let service = ApplicationAIService(config: .load())
+        input = ""
+        thinking = true
+        defer { thinking = false }
+        messages.append((true, question))
         do {
-            let ctx = Prompts.timestamped(episode.segments)
-            let (s, u) = Prompts.ask(question: q, context: ctx)
-            let ans = try await AIClient(config: .load()).chat(system: s, user: u)
-            messages.append((false, ans))
+            let answer = try await service.answer(question: question, segments: episode.segments)
+            messages.append((false, answer))
         } catch {
-            messages.append((false, "出錯：\(error.localizedDescription)"))
+            messages.append((false, "\(service.route.title) 出錯：\(error.localizedDescription)"))
         }
-        thinking = false
     }
+}
+
+/// Notes written by earlier versions were stored as the whole JSON object.
+/// Decode that known shape for display/export without changing persisted content.
+func displayedSnipNote(_ value: String) -> String {
+    guard let data = value.data(using: .utf8),
+          let output = try? JSONDecoder().decode(NoteOutput.self, from: data),
+          nonblank(output.note) else { return value }
+    return output.note
 }
 
 struct SnipListView: View {
@@ -172,7 +159,15 @@ struct SnipListView: View {
                         Text(snip.episodeTitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Text(snip.text).font(.subheadline).lineLimit(4)
-                    if let n = snip.aiNote { Text(n).font(.caption).foregroundStyle(.purple) }
+                    if let note = snip.aiNote { Text(displayedSnipNote(note)).font(.caption).foregroundStyle(.purple) }
+                    if let error = snip.aiError {
+                        Text(UserFacingAIError.shareLine(stored: error)).font(.caption).foregroundStyle(.orange)
+                        HStack {
+                            Button("重試") { Task { await Snack.shared.retryNote(snip) } }
+                            Button("清除") { Snack.shared.clearFailure(snip) }
+                        }
+                        .font(.caption)
+                    }
                     ShareLink(item: markdown(for: snip), preview: SharePreview("分享擷取")) {
                         Label("分享", systemImage: "square.and.arrow.up").font(.caption)
                     }
@@ -190,6 +185,12 @@ struct SnipListView: View {
     }
 
     func markdown(for s: Snip) -> String {
-        "# Snip — \(s.episodeTitle)\n\n⏱ \(fmtTime(s.atTime))\n\n> \(s.text)\n\n\(s.aiNote ?? "")\n"
+        snipShareMarkdown(episodeTitle: s.episodeTitle, atTime: s.atTime, text: s.text, aiNote: s.aiNote, aiError: s.aiError)
     }
+}
+
+func snipShareMarkdown(episodeTitle: String, atTime: Double, text: String, aiNote: String?, aiError: String?) -> String {
+    let note = aiNote.map(displayedSnipNote) ?? ""
+    let failure = UserFacingAIError.shareLine(stored: aiError)
+    return "# Snip — \(episodeTitle)\n\n⏱ \(fmtTime(atTime))\n\n> \(text)\n\n\(note)\n\(failure)\n"
 }

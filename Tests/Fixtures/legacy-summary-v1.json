@@ -1,0 +1,7 @@
+{
+  "format": "podsnip-summary-v1-unversioned",
+  "takeawaysJSON": "{\"takeaways\":[{\"title\":\"合成要點\",\"detail\":\"舊版說明\"},{\"title\":\"只有標題\",\"at\":\"12.5\"}]}",
+  "chaptersJSON": "{\"chapters\":[{\"start\":480,\"title\":\"合成章節\"},{\"title\":\"缺秒數\",\"summary\":\"一句\"}]}",
+  "mindmapJSON": "{\"branches\":[{\"label\":\"分支\",\"children\":[{\"label\":\"葉\",\"children\":[{\"label\":\"更深一層\"}]}]}]}",
+  "insightsJSON": "{\"insights\":[{\"title\":\"洞見\"},{\"title\":\"有內文\",\"body\":\"依據\"}],\"questions\":[\"舊鍵名\"]}"
+}

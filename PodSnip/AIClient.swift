@@ -7,22 +7,116 @@ enum AIError: LocalizedError {
     case emptyResponse
     case decode(String)
 
-    var errorDescription: String? {
+    /// User-facing text. The associated HTTP/decode payloads stay on the error
+    /// for transport diagnostics and are never copied into this string.
+    var safeDescription: String {
         switch self {
         case .notConfigured: return "請先在設定裡填入 AI Base URL、API Key 和模型。"
         case .badURL: return "Base URL 格式錯誤。"
-        case .http(let code, let body): return "AI 請求失敗 HTTP \(code)：\(body.prefix(200))"
+        case .http(let code, _): return "AI 請求失敗 HTTP \(code)。"
         case .emptyResponse: return "AI 回傳為空。"
-        case .decode(let s): return "AI 回傳解析失敗：\(s.prefix(160))"
+        case .decode: return "AI 回傳解析失敗。"
         }
     }
+
+    var errorDescription: String? { safeDescription }
+}
+
+/// Messages that can be stored on a Snip or placed in share text.
+enum UserFacingAIError {
+    static func message(for error: Error) -> String {
+        if let ai = error as? AIError { return ai.safeDescription }
+        if error is AIServiceError { return error.localizedDescription }
+        return "AI 筆記失敗。"
+    }
+
+    static func saveFailure() -> String { "AI 筆記儲存失敗。" }
+
+    /// Share text is limited to messages this app generates. A stored provider
+    /// body, including an older `HTTP n：<raw body>` string, becomes a fixed line.
+    static func shareLine(stored: String?) -> String {
+        guard let stored else { return "" }
+        let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        guard isSafeSummary(trimmed) else { return "AI 筆記失敗。" }
+        return "AI 筆記失敗：\(trimmed)"
+    }
+
+    private static func isSafeSummary(_ text: String) -> Bool {
+        if exactMessages.contains(text) { return true }
+        guard let prefix = detailPrefixes.first(where: { text.hasPrefix($0) }) else { return false }
+        let suffix = text.dropFirst(prefix.count)
+        guard !suffix.isEmpty, suffix.count <= 80 else { return false }
+        return isSafeDetail(suffix)
+    }
+
+    /// Details are app-authored Chinese, digits, and a few fixed tokens.
+    /// Provider and SDK debug text is Latin prose and does not pass.
+    private static func isSafeDetail<S: StringProtocol>(_ suffix: S) -> Bool {
+        var rest = Substring(suffix)
+        while !rest.isEmpty {
+            if rest.hasPrefix("Apple") {
+                rest = rest.dropFirst(5)
+                continue
+            }
+            if rest.hasPrefix("tokens") {
+                rest = rest.dropFirst(6)
+                continue
+            }
+            let character = rest.removeFirst()
+            if character.isNumber || character.isWhitespace { continue }
+            if character == "T" || character == "Z" { continue }
+            if "，。、：；；（）()/-:".contains(character) { continue }
+            if character >= "\u{4e00}", character <= "\u{9fff}" { continue }
+            return false
+        }
+        return true
+    }
+
+    private static let exactMessages: Set<String> = [
+        "請先在設定裡填入 AI Base URL、API Key 和模型。",
+        "Base URL 格式錯誤。",
+        "AI 回傳為空。",
+        "AI 回傳解析失敗。",
+        "AI 筆記儲存失敗。",
+        "儲存失敗。",
+    ]
+
+    private static let detailPrefixes = [
+        "AI 請求失敗 HTTP ",
+        "AI 暫不可用：",
+        "AI 上下文超出限制：",
+        "AI 輸出格式錯誤：",
+        "Apple 雲端配額已達上限：",
+        "Apple 雲端網路失敗：",
+        "Apple 雲端服務暫不可用：",
+    ]
 }
 
 /// OpenAI-compatible chat client (OpenAI / Anthropic-compat / Gemini-compat / OpenRouter).
-struct AIClient {
+struct AIClient: AIProvider {
     let config: AIConfig
+    private let session: URLSession
+    init(config: AIConfig, session: URLSession = .shared) {
+        self.config = config
+        self.session = session
+    }
+    var route: AIRoute { .byok }
+    var availability: AIAvailability {
+        AIAvailability(isAvailable: config.isConfigured, reason: config.isConfigured ? "端點設定完整；連線及模型支援待測試" : "請填入有效的 Base URL、Key、模型")
+    }
 
-    func chat(system: String, user: String, jsonMode: Bool = false, maxTokens: Int = 4096) async throws -> String {
+    func text(_ request: AIRequest) async throws -> String {
+        try await chat(system: request.system, user: request.user, maxTokens: request.maximumOutputTokens)
+    }
+    func structured(_ request: AIRequest, kind: AIOutputKind) async throws -> Data {
+        // JSON object mode is a transport request, not schema enforcement. The
+        // service decodes and validates the same Codable shapes as Apple output.
+        let result = try await chat(system: request.system, user: request.user, jsonMode: true, maxTokens: request.maximumOutputTokens)
+        return Data(result.utf8)
+    }
+
+    private func chat(system: String, user: String, jsonMode: Bool = false, maxTokens: Int = 4096) async throws -> String {
         guard config.isConfigured else { throw AIError.notConfigured }
         let base = config.baseURL.hasSuffix("/") ? String(config.baseURL.dropLast()) : config.baseURL
         guard let url = URL(string: base + "/chat/completions") else { throw AIError.badURL }
@@ -43,21 +137,27 @@ struct AIClient {
         req.timeoutInterval = 180
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw AIError.http(-1, "no response") }
         guard (200..<300).contains(http.statusCode) else {
             throw AIError.http(http.statusCode, String(data: data, encoding: .utf8) ?? "")
         }
-        struct Choice: Decodable { struct Msg: Decodable { var content: String? }; var message: Msg }
+        struct Choice: Decodable {
+            struct Msg: Decodable { var content: String? }
+            var message: Msg
+            var finish_reason: String?
+        }
         struct Reply: Decodable { var choices: [Choice] }
         guard let reply = try? JSONDecoder().decode(Reply.self, from: data),
-              let text = reply.choices.first?.message.content, !text.isEmpty else {
+              let choice = reply.choices.first,
+              let text = choice.message.content, !text.isEmpty else {
             throw AIError.decode(String(data: data, encoding: .utf8) ?? "")
+        }
+        if choice.finish_reason == "length" { throw AIServiceError.context("供應商達到輸出上限；未儲存不完整回應") }
+        if let reason = choice.finish_reason, reason != "stop" {
+            throw AIServiceError.malformed("供應商未完成文字回應（\(reason)）")
         }
         return text
     }
 
-    func testConnection() async throws -> String {
-        try await chat(system: "Reply with exactly: OK", user: "ping", maxTokens: 16)
-    }
 }
