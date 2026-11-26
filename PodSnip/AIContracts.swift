@@ -243,11 +243,10 @@ enum SummaryArchive {
     private static func schemaVersion(in object: [String: Any]) -> VersionToken {
         guard object.keys.contains(versionKey) else { return .absent }
         guard let number = object[versionKey] as? NSNumber, !isJSONBoolean(number) else { return .invalid }
-        let value = number.doubleValue
-        guard value.isFinite, value >= 0, value <= Double(Int.max), value.rounded(.towardZero) == value else {
+        guard let version = Int(exactly: number.doubleValue), version >= 0 else {
             return .invalid
         }
-        return .number(Int(value))
+        return .number(version)
     }
 
     private static func legacyTakeaways(_ object: [String: Any]) -> [TakeawayOutput]? {

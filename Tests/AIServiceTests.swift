@@ -476,6 +476,13 @@ final class AIServiceTests: XCTestCase {
         XCTAssertNil(SummaryArchive.takeaways(from: #"{"schemaVersion":"2","takeaways":[{"title":"字串"}]}"#))
         XCTAssertNil(SummaryArchive.takeaways(from: #"{"schemaVersion":true,"takeaways":[{"title":"布林"}]}"#))
 
+        for token in ["9223372036854775807", "9223372036854775808"] {
+            let oversized = """
+                {"schemaVersion":\(token),"takeaways":[{"title":"oversized","detail":"detail","at":1}]}
+                """
+            XCTAssertNil(SummaryArchive.takeaways(from: oversized), "schemaVersion: \(token)")
+        }
+
         let persisted = try SummaryArchive.persist(TakeawaysOutput(takeaways: [
             TakeawayOutput(title: "新要點", detail: "完整", at: 4)
         ]))
